@@ -1,0 +1,13 @@
+.DS_Store
+.env
+.env.*
+!.env.example
+.superpowers/
+node_modules/
+coverage/
+dist/
+out/
+release/
+*.log
+work/
+outputs/
