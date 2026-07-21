@@ -1,7 +1,7 @@
 # Branchestra 設計規格
 
 - 日期：2026-07-21
-- 狀態：設計內容已核准，內部技術複核完成，等待使用者核准規格文件
+- 狀態：設計內容與規格文件已由使用者核准，進入分階段實作規劃
 - 產品名稱：Branchestra
 - 專案識別：`branchestra`
 - 授權：MIT
@@ -178,7 +178,7 @@ Adapter capability 不能只用單一布林值概括。至少要分別回報：
 - 支援矩陣以 `(SDK version, external CLI version, macOS architecture)` 為單位；外部 CLI 的事件 schema 變更不能被 SDK lockfile 掩蓋。
 - 每次啟動執行 capability probe；未通過支援矩陣時阻止工作並顯示修復指引。
 - Adapter 以錄製的 Provider 事件建立 contract fixtures，容許未知欄位但拒絕缺少關鍵語義。
-- 若 SDK 版本不再允許指定外部 executable，對應 Adapter 必須停用該 SDK 路徑；可改用官方 CLI JSONL fallback，但不改變 workflow、資料庫或 UI 契約。
+- 若 SDK 版本不再允許指定外部 executable 或載入受審核的 authoritative config lock，對應 Adapter 必須停用；任何 CLI JSONL 替代路徑都要另立設計／威脅模型並重新通過發佈證據，不在 MVP 中暗中 fallback。
 
 ## 6. Subscription-only 認證邊界
 
@@ -191,17 +191,22 @@ Branchestra 是公開的第三方本機工具，因此不提供「使用 Claude.
 執行 Agent 子程序時：
 
 - 使用經驗證的 CLI 絕對路徑，不依賴 Finder 啟動時可能缺失的 shell `PATH`。
-- 以 adapter-specific child environment allowlist 建立乾淨環境，而不是只刪除兩個已知變數；排除 API key、auth token、Bedrock／Vertex／Foundry、custom provider、custom base URL 與其他非訂閱登入來源。
-- 禁止 SDK 的 `apiKey`、`baseUrl` 或 custom provider 選項，並使用實際將要啟動的外部 runtime 執行 auth-mode probe。
+- 以 adapter-specific child environment allowlist 建立乾淨環境，而不是只刪除兩個已知變數；排除 API key、auth token、Bedrock／Vertex／Foundry 與其他非訂閱登入來源。保留真實 `HOME` 只供官方 CLI 讀取自己的訂閱憑證，不把該處的 Provider 設定視為可信。
+- 禁止 SDK 的 `apiKey`、`baseUrl` 或 caller-authored custom provider 選項，並使用實際將要啟動的外部 runtime 執行 auth-mode probe。
+- Codex probe 與每次 start/resume 都必須載入由精確支援 CLI 產生、完整審核且 SHA-256 固定的 effective-config lock；lock 固定內建 `openai` provider 與官方 ChatGPT endpoint、`allow_codex_version_mismatch=false`，並作為 authoritative layer 取代 home／project config。缺檔、symlink、hash／版本不符、SDK 不支援 lock replay，或惡意 endpoint canary 觸發時一律停用 Codex。
 - 不提供 API key fallback；無法確認支援的登入狀態就停止。
 - Token 不傳到 Renderer、不寫 SQLite、不出現在 diagnostic logs。
 - UI 顯示 Provider、CLI 版本、登入可用性與「Subscription-only」狀態，但不顯示憑證內容。
 
-只有 runtime 明確回報允許的 ChatGPT／Claude subscription auth mode 時才可執行；若該 CLI 版本無法可靠揭露 auth mode，對應組合不列入支援矩陣。Auth precedence 測試必須涵蓋 keychain 登入、儲存的 API key、環境 token、custom endpoint 與各雲端 Provider 切換。
+只有 runtime 明確回報允許的 ChatGPT／Claude subscription auth mode 時才可執行；若該 CLI 版本無法可靠揭露 auth mode，對應組合不列入支援矩陣。Auth precedence 測試必須涵蓋 keychain 登入、儲存的 API key、環境 token、惡意 home／project custom endpoint、config-lock hash／版本不符與各雲端 Provider 切換。Codex 公開發佈證據還要在 arm64／x64 的真實訂閱 smoke 中證明惡意 loopback endpoint 零連線。
 
 Provider 最終如何計算、限制或改變訂閱額度仍由 Anthropic／OpenAI 決定。Branchestra 能保證的是：自身不配置 API key 計費路徑、只允許經測試且明確識別的訂閱登入、遇到不明認證模式時 fail closed，並透過相容性更新因應官方政策或 SDK 變更。
 
 公開 release 前確認兩家 Provider 當時的開發者條款與訂閱使用政策是 release blocker。若任一 Provider 不允許這類本機第三方調用，MVP 不得宣稱同時支援兩者；對應 Adapter 應停用，而不是繞過政策或偷偷切換 API 計費。
+
+截至 2026-07-21，Anthropic 的 Agent SDK legal/compliance 文件明確要求第三方產品事先取得核准，才能使用使用者的 Claude.ai Free／Pro／Max 憑證或額度。因此目前公開 release 的 `claudeSubscription` capability 必須預設停用；可以完成 Adapter 介面、fixtures、mock tests 與私人開發驗證，但 GitHub Release／Homebrew build 不得啟用，直到 repository 中記錄 Anthropic 的明確核准與適用範圍。這是發佈條件，不以技術手段繞過。
+
+OpenAI 的現行 Codex plan 文件則明確同時列出「使用 ChatGPT plan」與「可透過 Codex SDK 程式化控制 Codex」。因此 Codex 可以進入公開支援候選，但仍必須由 30 天內複核的官方文件證據、精確 SDK／CLI 相容列，以及 arm64／x64 真實 enforcement smoke report 共同啟用；單靠專案自行宣告 `allowed` 不足以發佈。這也只界定受支援的登入／控制路徑，不承諾 Provider 永遠以同一種額度、價格或限制計算。
 
 ## 7. 核心資料模型
 
@@ -593,8 +598,10 @@ MVP 完成必須同時滿足：
 ## 20. 參考資料
 
 - [Claude Agent SDK overview](https://platform.claude.com/docs/en/agent-sdk/overview)
+- [Claude Agent SDK legal and compliance](https://code.claude.com/docs/en/legal-and-compliance)
 - [Using the Claude Agent SDK with a Claude plan](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan)
 - [OpenAI Codex SDK](https://learn.chatgpt.com/docs/codex-sdk)
+- [Using Codex with your ChatGPT plan](https://help.openai.com/en/articles/11369540-using-codex-with-your-chatgpt-plan)
 - [Electron utilityProcess](https://www.electronjs.org/docs/latest/api/utility-process)
 - [Electron security recommendations](https://www.electronjs.org/docs/latest/tutorial/security)
 - [Homebrew Cask Cookbook](https://docs.brew.sh/Cask-Cookbook)
