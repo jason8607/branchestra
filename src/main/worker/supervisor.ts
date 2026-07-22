@@ -41,6 +41,8 @@ export function createWorkerSupervisor(dependencies: WorkerSupervisorDependencie
     generation: string;
     cancelHandshakeTimeout: () => void;
     cancelStableReset: () => void;
+    unsubscribeMessage: () => void;
+    unsubscribeExit: () => void;
     failed: boolean;
   };
 
@@ -49,6 +51,7 @@ export function createWorkerSupervisor(dependencies: WorkerSupervisorDependencie
   let state: "idle" | "starting" | "ready" | "stopping" | "stopped" = "idle";
   let startPromise: Promise<WorkerReady> | null = null;
   let resolveStart: ((ready: WorkerReady) => void) | null = null;
+  let rejectStart: ((error: Error) => void) | null = null;
   let restartIndex = 0;
   let cancelRestart: (() => void) | null = null;
   let stopPromise: Promise<void> | null = null;
@@ -59,7 +62,20 @@ export function createWorkerSupervisor(dependencies: WorkerSupervisorDependencie
   }>();
 
   const emit = (event: WorkerEventEnvelope): void => {
-    for (const listener of listeners) listener(event);
+    for (const listener of listeners) {
+      try {
+        listener(event);
+      } catch {
+        // A renderer-facing subscriber cannot disable worker cleanup or restart handling.
+      }
+    }
+  };
+
+  const detach = (target: ActiveChild): void => {
+    target.unsubscribeMessage();
+    target.unsubscribeExit();
+    target.unsubscribeMessage = () => undefined;
+    target.unsubscribeExit = () => undefined;
   };
 
   const scheduleReplacement = (): void => {
@@ -70,7 +86,7 @@ export function createWorkerSupervisor(dependencies: WorkerSupervisorDependencie
     restartIndex = Math.min(restartIndex + 1, lastIndex);
     cancelRestart = dependencies.schedule(delayMs, () => {
       cancelRestart = null;
-      spawn();
+      if (state !== "stopping" && state !== "stopped") spawn();
     });
   };
 
@@ -84,6 +100,7 @@ export function createWorkerSupervisor(dependencies: WorkerSupervisorDependencie
     target.failed = true;
     target.cancelHandshakeTimeout();
     target.cancelStableReset();
+    detach(target);
     if (kill) target.process.kill();
     for (const correlation of pending.values()) {
       correlation.reject(new Error(`Worker disconnected: ${reason}`));
@@ -106,6 +123,7 @@ export function createWorkerSupervisor(dependencies: WorkerSupervisorDependencie
   };
 
   const spawn = (): void => {
+    if (state === "stopping" || state === "stopped") return;
     generation = dependencies.nextGeneration();
     const expectedGeneration = generation;
     const environment = dependencies.environment ?? process.env;
@@ -126,6 +144,8 @@ export function createWorkerSupervisor(dependencies: WorkerSupervisorDependencie
       generation: expectedGeneration,
       cancelHandshakeTimeout: () => undefined,
       cancelStableReset: () => undefined,
+      unsubscribeMessage: () => undefined,
+      unsubscribeExit: () => undefined,
       failed: false
     };
     active = target;
@@ -134,7 +154,7 @@ export function createWorkerSupervisor(dependencies: WorkerSupervisorDependencie
       5_000,
       () => fail(target, "handshake-timeout", true)
     );
-    childProcess.onMessage((value) => {
+    target.unsubscribeMessage = childProcess.onMessage((value) => {
       if (active !== target) return;
       const parsedResponse = WorkerResponseEnvelopeSchema.safeParse(value);
       if (parsedResponse.success && parsedResponse.data.workerGeneration === expectedGeneration) {
@@ -145,6 +165,7 @@ export function createWorkerSupervisor(dependencies: WorkerSupervisorDependencie
         }
         return;
       }
+      if (state === "stopping" || state === "stopped") return;
       const parsed = WorkerEventEnvelopeSchema.safeParse(value);
       if (!parsed.success || parsed.data.workerGeneration !== expectedGeneration) return;
       if (parsed.data.type === "worker.rejected") {
@@ -162,20 +183,25 @@ export function createWorkerSupervisor(dependencies: WorkerSupervisorDependencie
         state = "ready";
         resolveStart?.({ workerGeneration: expectedGeneration });
         resolveStart = null;
+        rejectStart = null;
         target.cancelStableReset = dependencies.schedule(5_000, () => {
           if (active === target && state === "ready") restartIndex = 0;
         });
       }
       emit(parsed.data);
     });
-    childProcess.onExit((code) => fail(target, `exit:${code}`, false));
+    target.unsubscribeExit = childProcess.onExit((code) => fail(target, `exit:${code}`, false));
   };
 
   return {
     start() {
+      if (state === "stopping" || state === "stopped") {
+        return Promise.reject(new Error("Worker supervisor is stopping or stopped"));
+      }
       if (startPromise === null) {
-        startPromise = new Promise((resolve) => {
+        startPromise = new Promise((resolve, reject) => {
           resolveStart = resolve;
+          rejectStart = reject;
         });
         spawn();
       }
@@ -187,6 +213,9 @@ export function createWorkerSupervisor(dependencies: WorkerSupervisorDependencie
       }
       const parsed = WorkerRequestEnvelopeSchema.safeParse(request);
       if (!parsed.success) return Promise.reject(new Error("Worker request is invalid"));
+      if (pending.has(parsed.data.requestId)) {
+        return Promise.reject(new Error(`Duplicate in-flight requestId: ${parsed.data.requestId}`));
+      }
       return new Promise((resolve, reject) => {
         pending.set(parsed.data.requestId, { resolve, reject });
         try {
@@ -205,6 +234,9 @@ export function createWorkerSupervisor(dependencies: WorkerSupervisorDependencie
       if (stopPromise !== null) return stopPromise;
       stopPromise = (async () => {
         state = "stopping";
+        rejectStart?.(new Error("Worker supervisor is stopping"));
+        resolveStart = null;
+        rejectStart = null;
         cancelRestart?.();
         cancelRestart = null;
         const target = active;
@@ -258,8 +290,9 @@ export function createWorkerSupervisor(dependencies: WorkerSupervisorDependencie
             ])
           : false;
         pending.delete(requestId);
-        if (prepared) cancelDeadline();
-        else {
+        cancelDeadline();
+        detach(target);
+        if (!prepared) {
           try {
             target.process.kill();
           } catch {

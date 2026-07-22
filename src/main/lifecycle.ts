@@ -17,6 +17,7 @@ export interface LifecycleDependencies {
   createWindow(): Promise<unknown>;
   focusWindow(): void;
   quitTimeoutMs: number;
+  reportError(error: unknown): void;
 }
 
 export function installApplicationLifecycle(dependencies: LifecycleDependencies): void {
@@ -27,20 +28,30 @@ export function installApplicationLifecycle(dependencies: LifecycleDependencies)
 
   let allowQuit = false;
   let quitPromise: Promise<void> | null = null;
+  const reportError = (error: unknown): void => {
+    try {
+      dependencies.reportError(error);
+    } catch {
+      // Error reporting must not create another unhandled lifecycle failure.
+    }
+  };
   dependencies.app.on("second-instance", () => dependencies.focusWindow());
+  dependencies.app.on("window-all-closed", () => dependencies.app.quit());
   dependencies.app.on("before-quit", (...args) => {
     if (allowQuit) return;
     const event = args[0] as PreventableApplicationEvent;
     event.preventDefault();
     if (quitPromise !== null) return;
     const deadlineMs = Date.now() + dependencies.quitTimeoutMs;
-    quitPromise = dependencies.supervisor.stop(deadlineMs).finally(() => {
-      allowQuit = true;
-      dependencies.app.quit();
-    });
+    quitPromise = dependencies.supervisor.stop(deadlineMs)
+      .catch(reportError)
+      .finally(() => {
+        allowQuit = true;
+        dependencies.app.quit();
+      });
   });
   void dependencies.app.whenReady().then(async () => {
     await dependencies.supervisor.start();
     await dependencies.createWindow();
-  });
+  }).catch(reportError);
 }

@@ -24,7 +24,10 @@ function lifecycleFixture(options: { lock: boolean }) {
   const stopped = deferred();
   const app = {
     requestSingleInstanceLock: vi.fn(() => options.lock),
-    quit: vi.fn(),
+    quit: vi.fn(() => {
+      const event = { preventDefault: vi.fn() };
+      for (const listener of listeners.get("before-quit") ?? []) listener(event);
+    }),
     whenReady: vi.fn(() => ready.promise),
     on: vi.fn((name: string, listener: (...args: unknown[]) => void) => {
       const registered = listeners.get(name) ?? [];
@@ -41,12 +44,14 @@ function lifecycleFixture(options: { lock: boolean }) {
   };
   const createWindow = vi.fn(async () => undefined);
   const focusWindow = vi.fn();
+  const reportError = vi.fn();
   const dependencies: LifecycleDependencies = {
     app,
     supervisor,
     createWindow,
     focusWindow,
-    quitTimeoutMs: 5_000
+    quitTimeoutMs: 5_000,
+    reportError
   };
   const emit = (name: string, ...args: unknown[]): void => {
     for (const listener of listeners.get(name) ?? []) listener(...args);
@@ -56,6 +61,7 @@ function lifecycleFixture(options: { lock: boolean }) {
     supervisor,
     createWindow,
     focusWindow,
+    reportError,
     dependencies,
     async emitReady() {
       ready.resolve();
@@ -71,6 +77,9 @@ function lifecycleFixture(options: { lock: boolean }) {
     emitSecondInstance() {
       emit("second-instance");
     },
+    emitWindowAllClosed() {
+      emit("window-all-closed");
+    },
     async finishStop() {
       stopped.resolve();
       await stopped.promise;
@@ -85,7 +94,7 @@ describe("application lifecycle", () => {
     expect(resolveBootstrapPaths("file:///app/out/main/bootstrap.js", "/data/user")).toEqual({
       workerEntry: "/app/out/main/worker.js",
       dbPath: "/data/user/branchestra.sqlite3",
-      preloadEntry: "/app/out/preload/index.js",
+      preloadEntry: "/app/out/preload/index.mjs",
       rendererEntry: "/app/out/renderer/index.html"
     });
   });
@@ -122,6 +131,48 @@ describe("application lifecycle", () => {
     expect(second.preventDefault).toHaveBeenCalledOnce();
     expect(fixture.supervisor.stop).toHaveBeenCalledOnce();
     await fixture.finishStop();
+    expect(fixture.app.quit).toHaveBeenCalledOnce();
+  });
+
+  it("quits through the worker handshake when the last window closes", async () => {
+    const fixture = lifecycleFixture({ lock: true });
+    installApplicationLifecycle(fixture.dependencies);
+    await fixture.emitReady();
+
+    fixture.emitWindowAllClosed();
+
+    expect(fixture.app.quit).toHaveBeenCalledOnce();
+    expect(fixture.supervisor.stop).toHaveBeenCalledOnce();
+    await fixture.finishStop();
+    expect(fixture.app.quit).toHaveBeenCalledTimes(2);
+  });
+
+  it("reports startup rejection without creating a window or leaving an unhandled promise", async () => {
+    const fixture = lifecycleFixture({ lock: true });
+    const failure = new Error("worker start failed");
+    const reportError = vi.fn();
+    fixture.supervisor.start.mockRejectedValueOnce(failure);
+    installApplicationLifecycle({ ...fixture.dependencies, reportError });
+
+    await fixture.emitReady();
+
+    expect(reportError).toHaveBeenCalledWith(failure);
+    expect(fixture.createWindow).not.toHaveBeenCalled();
+  });
+
+  it("reports stop rejection and still performs the final quit", async () => {
+    const fixture = lifecycleFixture({ lock: true });
+    const failure = new Error("worker stop failed");
+    const reportError = vi.fn();
+    fixture.supervisor.stop.mockRejectedValueOnce(failure);
+    installApplicationLifecycle({ ...fixture.dependencies, reportError });
+    await fixture.emitReady();
+
+    fixture.emitBeforeQuit();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(reportError).toHaveBeenCalledWith(failure);
     expect(fixture.app.quit).toHaveBeenCalledOnce();
   });
 });

@@ -7,10 +7,14 @@ const generation = "50000000-0000-4000-8000-000000000001";
 class FakeChild implements UtilityProcessChild {
   readonly messages: unknown[] = [];
   killCalls = 0;
+  postError: Error | null = null;
   private readonly messageListeners = new Set<(value: unknown) => void>();
   private readonly exitListeners = new Set<(code: number) => void>();
 
-  postMessage(value: unknown): void { this.messages.push(value); }
+  postMessage(value: unknown): void {
+    if (this.postError !== null) throw this.postError;
+    this.messages.push(value);
+  }
   onMessage(listener: (value: unknown) => void): () => void {
     this.messageListeners.add(listener);
     return () => this.messageListeners.delete(listener);
@@ -22,6 +26,8 @@ class FakeChild implements UtilityProcessChild {
   kill(): boolean { this.killCalls += 1; return true; }
   emitMessage(value: unknown): void { for (const listener of this.messageListeners) listener(value); }
   emitExit(code = 1): void { for (const listener of this.exitListeners) listener(code); }
+  messageListenerCount(): number { return this.messageListeners.size; }
+  exitListenerCount(): number { return this.exitListeners.size; }
 }
 
 class FakeAdapter implements UtilityProcessAdapter {
@@ -93,6 +99,22 @@ function preparedResponse(workerGeneration: string, requestId = "20000000-0000-4
       requestType: "worker.prepareQuit",
       data: { prepared: true },
       replayed: false
+    }
+  };
+}
+
+function failedPrepareResponse(workerGeneration: string, requestId: string) {
+  return {
+    v: 1,
+    requestId,
+    idempotencyKey: `quit:${requestId}`,
+    workerGeneration,
+    type: "response",
+    payload: {
+      ok: false,
+      requestType: "worker.prepareQuit",
+      code: "INTERNAL",
+      message: "prepare failed"
     }
   };
 }
@@ -399,5 +421,184 @@ describe("worker supervisor", () => {
     expect(adapter.children[0]!.killCalls).toBe(1);
     expect(adapter.children).toHaveLength(1);
     now.mockRestore();
+  });
+
+  it("keeps stopping terminal when ready and exit arrive after stop begins", async () => {
+    const adapter = new FakeAdapter();
+    const scheduler = new FakeScheduler();
+    const now = vi.spyOn(Date, "now").mockReturnValue(10_000);
+    const supervisor = createWorkerSupervisor({
+      utilityProcess: adapter,
+      workerEntry: "/app/out/main/worker.js",
+      dbPath: "/data/branchestra.sqlite3",
+      ownerInstanceId,
+      nextGeneration: () => generation,
+      restartBackoffMs: [100, 250, 500, 1000, 2000],
+      schedule: scheduler.schedule
+    });
+    const starting = supervisor.start();
+
+    const stopping = supervisor.stop(10_750);
+    adapter.children[0]!.emitMessage(readyEnvelope(generation));
+    adapter.children[0]!.emitExit(1);
+
+    await expect(starting).rejects.toThrow(/stopping|stopped/i);
+    scheduler.runNext(750);
+    await stopping;
+    expect(scheduler.activeDelays()).toEqual([]);
+    expect(adapter.children).toHaveLength(1);
+    await expect(supervisor.start()).rejects.toThrow(/stopping|stopped/i);
+    now.mockRestore();
+  });
+
+  it("rejects a duplicate in-flight requestId without posting or replacing the first request", async () => {
+    const adapter = new FakeAdapter();
+    const supervisor = createWorkerSupervisor({
+      utilityProcess: adapter,
+      workerEntry: "/app/out/main/worker.js",
+      dbPath: "/data/branchestra.sqlite3",
+      ownerInstanceId,
+      nextGeneration: () => generation,
+      restartBackoffMs: [100, 250, 500, 1000, 2000],
+      schedule: () => () => undefined
+    });
+    const starting = supervisor.start();
+    adapter.children[0]!.emitMessage(readyEnvelope(generation));
+    await starting;
+    const request = prepareQuitRequest(generation);
+
+    const first = supervisor.request(request);
+    const duplicate = supervisor.request(request);
+
+    expect(adapter.children[0]!.messages).toEqual([request]);
+    await expect(duplicate).rejects.toThrow(/duplicate|in-flight/i);
+    adapter.children[0]!.emitMessage(preparedResponse(generation));
+    await expect(first).resolves.toMatchObject({ requestId: request.requestId });
+  });
+
+  it("isolates subscriber exceptions so an exit still cleans up and restarts", async () => {
+    const adapter = new FakeAdapter();
+    const scheduler = new FakeScheduler();
+    const supervisor = createWorkerSupervisor({
+      utilityProcess: adapter,
+      workerEntry: "/app/out/main/worker.js",
+      dbPath: "/data/branchestra.sqlite3",
+      ownerInstanceId,
+      nextGeneration: () => generation,
+      restartBackoffMs: [100, 250, 500, 1000, 2000],
+      schedule: scheduler.schedule
+    });
+    const starting = supervisor.start();
+    adapter.children[0]!.emitMessage(readyEnvelope(generation));
+    await starting;
+    const listener = vi.fn();
+    supervisor.subscribe(() => { throw new Error("subscriber failed"); });
+    supervisor.subscribe(listener);
+
+    expect(() => adapter.children[0]!.emitExit(17)).not.toThrow();
+
+    expect(listener).toHaveBeenCalledWith(expect.objectContaining({ type: "worker.disconnected" }));
+    expect(scheduler.activeDelays()).toEqual([100]);
+  });
+
+  it("isolates subscriber exceptions so LEASE_HELD still kills and restarts", () => {
+    const adapter = new FakeAdapter();
+    const scheduler = new FakeScheduler();
+    const supervisor = createWorkerSupervisor({
+      utilityProcess: adapter,
+      workerEntry: "/app/out/main/worker.js",
+      dbPath: "/data/branchestra.sqlite3",
+      ownerInstanceId,
+      nextGeneration: () => generation,
+      restartBackoffMs: [100, 250, 500, 1000, 2000],
+      schedule: scheduler.schedule
+    });
+    const listener = vi.fn();
+    supervisor.subscribe(() => { throw new Error("subscriber failed"); });
+    supervisor.subscribe(listener);
+    void supervisor.start();
+
+    expect(() => adapter.children[0]!.emitMessage(rejectedEnvelope(generation))).not.toThrow();
+
+    expect(listener).toHaveBeenCalledWith(expect.objectContaining({ type: "worker.rejected" }));
+    expect(adapter.children[0]!.killCalls).toBe(1);
+    expect(scheduler.activeDelays()).toEqual([100]);
+  });
+
+  it("detaches child listeners after failure and after completed stop", async () => {
+    const crashAdapter = new FakeAdapter();
+    const crashSupervisor = createWorkerSupervisor({
+      utilityProcess: crashAdapter,
+      workerEntry: "/app/out/main/worker.js",
+      dbPath: "/data/branchestra.sqlite3",
+      ownerInstanceId,
+      nextGeneration: () => generation,
+      restartBackoffMs: [100, 250, 500, 1000, 2000],
+      schedule: () => () => undefined
+    });
+    void crashSupervisor.start();
+    crashAdapter.children[0]!.emitExit(17);
+    expect(crashAdapter.children[0]!.messageListenerCount()).toBe(0);
+    expect(crashAdapter.children[0]!.exitListenerCount()).toBe(0);
+
+    const stopAdapter = new FakeAdapter();
+    const stopSupervisor = createWorkerSupervisor({
+      utilityProcess: stopAdapter,
+      workerEntry: "/app/out/main/worker.js",
+      dbPath: "/data/branchestra.sqlite3",
+      ownerInstanceId,
+      nextGeneration: () => generation,
+      restartBackoffMs: [100, 250, 500, 1000, 2000],
+      schedule: () => () => undefined
+    });
+    const starting = stopSupervisor.start();
+    stopAdapter.children[0]!.emitMessage(readyEnvelope(generation));
+    await starting;
+    const stopping = stopSupervisor.stop(Date.now() + 5_000);
+    const request = stopAdapter.children[0]!.messages[0] as ReturnType<typeof prepareQuitRequest>;
+    stopAdapter.children[0]!.emitMessage(preparedResponse(generation, request.requestId));
+    await stopping;
+    expect(stopAdapter.children[0]!.messageListenerCount()).toBe(0);
+    expect(stopAdapter.children[0]!.exitListenerCount()).toBe(0);
+  });
+
+  it("cancels the shutdown deadline after post failure and non-success response", async () => {
+    const postAdapter = new FakeAdapter();
+    const postScheduler = new FakeScheduler();
+    const postSupervisor = createWorkerSupervisor({
+      utilityProcess: postAdapter,
+      workerEntry: "/app/out/main/worker.js",
+      dbPath: "/data/branchestra.sqlite3",
+      ownerInstanceId,
+      nextGeneration: () => generation,
+      restartBackoffMs: [100, 250, 500, 1000, 2000],
+      schedule: postScheduler.schedule
+    });
+    const postStarting = postSupervisor.start();
+    postAdapter.children[0]!.emitMessage(readyEnvelope(generation));
+    await postStarting;
+    postAdapter.children[0]!.postError = new Error("post failed");
+    await postSupervisor.stop(Date.now() + 5_000);
+    expect(postScheduler.activeDelays()).toEqual([]);
+
+    const responseAdapter = new FakeAdapter();
+    const responseScheduler = new FakeScheduler();
+    const responseSupervisor = createWorkerSupervisor({
+      utilityProcess: responseAdapter,
+      workerEntry: "/app/out/main/worker.js",
+      dbPath: "/data/branchestra.sqlite3",
+      ownerInstanceId,
+      nextGeneration: () => generation,
+      restartBackoffMs: [100, 250, 500, 1000, 2000],
+      schedule: responseScheduler.schedule
+    });
+    const responseStarting = responseSupervisor.start();
+    responseAdapter.children[0]!.emitMessage(readyEnvelope(generation));
+    await responseStarting;
+    const stopping = responseSupervisor.stop(Date.now() + 5_000);
+    const request = responseAdapter.children[0]!.messages[0] as ReturnType<typeof prepareQuitRequest>;
+    responseAdapter.children[0]!.emitMessage(failedPrepareResponse(generation, request.requestId));
+    await stopping;
+    expect(responseScheduler.activeDelays()).toEqual([]);
   });
 });

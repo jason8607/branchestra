@@ -19,7 +19,7 @@ export function resolveBootstrapPaths(mainModuleUrl: string, userDataPath: strin
   return {
     workerEntry: join(mainDirectory, "worker.js"),
     dbPath: join(userDataPath, "branchestra.sqlite3"),
-    preloadEntry: join(mainDirectory, "../preload/index.js"),
+    preloadEntry: join(mainDirectory, "../preload/index.mjs"),
     rendererEntry: join(mainDirectory, "../renderer/index.html")
   };
 }
@@ -64,6 +64,9 @@ export function bootstrapMain(): void {
       if (window.isMinimized()) window.restore();
       window.focus();
     },
-    quitTimeoutMs: 5_000
+    quitTimeoutMs: 5_000,
+    reportError(error) {
+      console.error("Application lifecycle failure", error);
+    }
   });
 }
