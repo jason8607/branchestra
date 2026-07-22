@@ -15,7 +15,10 @@ import type { WorkerSupervisor } from "../worker/supervisor";
 interface IpcMainAdapter {
   handle(
     channel: string,
-    listener: (event: { sender: { id: number }; senderFrame: { url: string } | null }, raw: unknown) => Promise<unknown>
+    listener: (event: {
+      sender: { id: number };
+      senderFrame: { url: string; parent: object | null } | null;
+    }, raw: unknown) => Promise<unknown>
   ): void;
   removeHandler(channel: string): void;
 }
@@ -34,7 +37,11 @@ export function registerRendererGateway(dependencies: RendererGatewayDependencie
     if (event.sender.id !== dependencies.trustedWebContents.id) {
       throw new Error("Untrusted renderer sender");
     }
-    if (event.senderFrame?.url !== dependencies.trustedRendererUrl) {
+    if (
+      event.senderFrame === null
+      || event.senderFrame.parent !== null
+      || event.senderFrame.url !== dependencies.trustedRendererUrl
+    ) {
       throw new Error("Untrusted renderer frame");
     }
 

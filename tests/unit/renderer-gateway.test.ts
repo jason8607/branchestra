@@ -121,7 +121,10 @@ function gatewayFixture(options: {
   dialogResult?: Promise<string | null>;
   responseTransform?: (response: WorkerResponseEnvelope) => WorkerResponseEnvelope;
 }) {
-  type Handler = (event: { sender: { id: number }; senderFrame: { url: string } | null }, raw: unknown) => Promise<unknown>;
+  type Handler = (event: {
+    sender: { id: number };
+    senderFrame: { url: string; parent: object | null } | null;
+  }, raw: unknown) => Promise<unknown>;
   const handlers = new Map<string, Handler>();
   const ipcMain = {
     handle: vi.fn((channel: string, handler: Handler) => handlers.set(channel, handler)),
@@ -166,10 +169,18 @@ function gatewayFixture(options: {
       dialog,
       supervisor
     },
-    async invoke(senderId: number, raw: unknown, senderUrl = "file:///app/out/renderer/index.html"): Promise<unknown> {
+    async invoke(
+      senderId: number,
+      raw: unknown,
+      senderUrl = "file:///app/out/renderer/index.html",
+      senderFrameParent: object | null = null
+    ): Promise<unknown> {
       const handler = handlers.get("branchestra:request");
       if (!handler) throw new Error("Renderer request handler is not registered");
-      return handler({ sender: { id: senderId }, senderFrame: { url: senderUrl } }, raw);
+      return handler({
+        sender: { id: senderId },
+        senderFrame: { url: senderUrl, parent: senderFrameParent }
+      }, raw);
     },
     emitEvent(event: unknown): void {
       eventListener?.(event);
@@ -231,6 +242,21 @@ describe("renderer gateway", () => {
     await expect(fixture.invoke(42, validSnapshotRequest(), "https://evil.example/")).rejects.toThrow(
       "Untrusted renderer frame"
     );
+    expect(fixture.supervisor.getGeneration).not.toHaveBeenCalled();
+    expect(fixture.supervisor.request).not.toHaveBeenCalled();
+  });
+
+  it("rejects a same-URL subframe before inspecting its envelope or causing side effects", async () => {
+    const fixture = gatewayFixture({ selectedPath: "/selected/by/main", senderId: 42 });
+    registerRendererGateway(fixture.dependencies);
+
+    await expect(fixture.invoke(
+      42,
+      { body: "x".repeat(MAX_IPC_BYTES) },
+      "file:///app/out/renderer/index.html",
+      {}
+    )).rejects.toThrow("Untrusted renderer frame");
+    expect(fixture.dialog.pickExistingProject).not.toHaveBeenCalled();
     expect(fixture.supervisor.getGeneration).not.toHaveBeenCalled();
     expect(fixture.supervisor.request).not.toHaveBeenCalled();
   });

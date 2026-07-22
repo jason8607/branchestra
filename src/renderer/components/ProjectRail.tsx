@@ -47,13 +47,14 @@ export function ProjectRail(props: {
               className="room-form"
               onSubmit={(event) => {
                 event.preventDefault();
+                const submittedDraft = roomTitle;
                 const submittedTitle = roomTitle.trim();
                 if (submittedTitle.length === 0 || creatingRoom) return;
                 setCreatingRoom(true);
                 setCreationError(null);
                 void props.onCreateRoom(project.id, submittedTitle)
                   .then(() => setRoomTitle((current) => (
-                    current.trim() === submittedTitle ? "" : current
+                    current === submittedDraft ? "" : current
                   )))
                   .catch(() => setCreationError("Room was not created. Check the connection and try again."))
                   .finally(() => setCreatingRoom(false));

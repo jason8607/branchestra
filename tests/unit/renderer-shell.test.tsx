@@ -240,6 +240,26 @@ describe("renderer shell", () => {
     expect(screen.getByRole("alert").textContent).toContain("not created");
   });
 
+  it("retains a whitespace-different newer room draft when the pending submission resolves", async () => {
+    const user = userEvent.setup();
+    const pending = deferred();
+    render(<ProjectRail
+      state={timelineState()}
+      onAddProject={vi.fn()}
+      onSelectRoom={vi.fn()}
+      onCreateRoom={() => pending.promise}
+    />);
+    const input = screen.getByTestId("room-title-input") as HTMLInputElement;
+    await user.type(input, "Roadmap");
+    await user.click(screen.getByTestId("create-room"));
+    await user.clear(input);
+    await user.type(input, " Roadmap ");
+
+    await act(async () => pending.resolve());
+
+    expect(input.value).toBe(" Roadmap ");
+  });
+
   it("exposes the create-room form for a selected empty project", () => {
     const addedProject: Project = {
       ...project(),
