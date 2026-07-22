@@ -33,13 +33,17 @@ class SqliteDatabase implements Database {
     try {
       const value = work();
       if (value instanceof Promise) throw new TypeError("Database transactions must be synchronous");
-      this.#transactionDepth -= 1;
       this.#raw.exec(depth === 0 ? "COMMIT" : `RELEASE SAVEPOINT ${savepoint}`);
       return value;
     } catch (error) {
-      this.#transactionDepth -= 1;
-      this.#raw.exec(depth === 0 ? "ROLLBACK" : `ROLLBACK TO SAVEPOINT ${savepoint}; RELEASE SAVEPOINT ${savepoint}`);
+      try {
+        this.#raw.exec(depth === 0 ? "ROLLBACK" : `ROLLBACK TO SAVEPOINT ${savepoint}; RELEASE SAVEPOINT ${savepoint}`);
+      } catch {
+        // Preserve the error from work or finalization when transaction cleanup is no longer possible.
+      }
       throw error;
+    } finally {
+      this.#transactionDepth = depth;
     }
   }
 
@@ -51,9 +55,18 @@ class SqliteDatabase implements Database {
 export function openDatabase(filePath: string): Database {
   if (filePath !== ":memory:") mkdirSync(dirname(filePath), { recursive: true });
   const raw = new DatabaseSync(filePath);
-  raw.exec("PRAGMA foreign_keys = ON");
-  if (filePath !== ":memory:") raw.exec("PRAGMA journal_mode = WAL");
-  raw.exec("PRAGMA synchronous = NORMAL");
-  raw.exec("PRAGMA busy_timeout = 5000");
-  return new SqliteDatabase(raw);
+  try {
+    raw.exec("PRAGMA foreign_keys = ON");
+    if (filePath !== ":memory:") raw.exec("PRAGMA journal_mode = WAL");
+    raw.exec("PRAGMA synchronous = NORMAL");
+    raw.exec("PRAGMA busy_timeout = 5000");
+    return new SqliteDatabase(raw);
+  } catch (error) {
+    try {
+      raw.close();
+    } catch {
+      // Preserve the original configuration error when closing the handle also fails.
+    }
+    throw error;
+  }
 }

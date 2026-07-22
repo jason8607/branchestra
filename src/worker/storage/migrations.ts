@@ -56,8 +56,8 @@ export function runMigrations(database: Database): void {
   const applied = database.prepare("SELECT 1 FROM schema_migrations WHERE version = ?");
   const record = database.prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)");
   for (const migration of migrations) {
-    if (applied.get(migration.version)) continue;
     database.transaction(() => {
+      if (applied.get(migration.version)) return;
       database.exec(migration.sql);
       record.run(migration.version, new Date().toISOString());
     });
