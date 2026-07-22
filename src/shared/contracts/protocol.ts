@@ -53,6 +53,7 @@ export const WorkerResponseEnvelopeSchema = z.object({
 
 export const WorkerEventEnvelopeSchema = z.discriminatedUnion("type", [
   z.object({ ...base, type: z.literal("worker.ready"), payload: z.object({ protocolVersion: z.literal(PROTOCOL_VERSION) }).strict() }).strict(),
+  z.object({ ...base, type: z.literal("worker.rejected"), payload: z.object({ code: z.literal("LEASE_HELD") }).strict() }).strict(),
   z.object({ ...base, type: z.literal("worker.disconnected"), payload: z.object({ reason: z.string().min(1) }).strict() }).strict(),
   z.object({ ...base, type: z.literal("room.event"), payload: RoomEventSchema }).strict(),
   z.object({ ...base, type: z.literal("state.invalidated"), payload: z.object({ roomId: UuidSchema.nullable() }).strict() }).strict()
