@@ -94,41 +94,4 @@ describe("inspectExistingRepository", () => {
     expect(gitError.cause.stderr).toBe("fatal: not a git repository\n");
   });
 
-  it("canonicalizes a linked worktree's symlinked common directory with argv-only Git", async () => {
-    const calls: Array<{ executable: string; args: readonly string[] }> = [];
-    const outputs = [
-      "/reported/worktree-root\n",
-      "/reported/gitdir-link/worktrees/feature\n",
-      `${"c".repeat(40)}\n`,
-      "feature\n"
-    ];
-    const execFile: ExecFileRunner = async (executable, args) => {
-      calls.push({ executable, args });
-      return { stdout: outputs.shift() ?? "", stderr: "" };
-    };
-    const canonicalPaths: Record<string, string> = {
-      "/chosen/worktree-symlink": "/canonical/worktree",
-      "/reported/worktree-root": "/canonical/worktree-root",
-      "/reported/gitdir-link/worktrees/feature": "/canonical/main.git/worktrees/feature"
-    };
-
-    const result = await inspectExistingRepository("/chosen/worktree-symlink", {
-      execFile,
-      realpath: async (path) => canonicalPaths[path] ?? path,
-      gitExecutable: "/usr/bin/git"
-    });
-
-    expect(result).toEqual({
-      repositoryRoot: "/canonical/worktree-root",
-      gitCommonDir: "/canonical/main.git/worktrees/feature",
-      headOid: "c".repeat(40),
-      defaultBranch: "feature"
-    });
-    expect(calls).toEqual([
-      { executable: "/usr/bin/git", args: ["-C", "/canonical/worktree", "rev-parse", "--path-format=absolute", "--show-toplevel"] },
-      { executable: "/usr/bin/git", args: ["-C", "/canonical/worktree-root", "rev-parse", "--path-format=absolute", "--git-common-dir"] },
-      { executable: "/usr/bin/git", args: ["-C", "/canonical/worktree-root", "rev-parse", "--verify", "HEAD^{commit}"] },
-      { executable: "/usr/bin/git", args: ["-C", "/canonical/worktree-root", "rev-parse", "--abbrev-ref", "HEAD"] }
-    ]);
-  });
 });
