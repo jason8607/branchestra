@@ -27,6 +27,8 @@ export interface ProjectService {
 export function createProjectService(dependencies: ProjectServiceDependencies): ProjectService {
   return {
     async addExistingProject(input, metadata) {
+      const replayed = dependencies.idempotencyStore.replay(metadata, ProjectSchema);
+      if (replayed) return replayed;
       const inspection = await dependencies.inspectRepository(input.selectedPath);
       return dependencies.idempotencyStore.execute(metadata, ProjectSchema, () => {
         const existing = dependencies.repositories.projects.findByRepositoryRoot(inspection.repositoryRoot);

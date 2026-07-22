@@ -106,4 +106,24 @@ describe("event storage", () => {
       database.close();
     }
   });
+
+  it("looks up only completed schema-validating durable results", () => {
+    const database = openDatabase(":memory:");
+    try {
+      runMigrations(database);
+      const dedupe = createIdempotencyStore(database, () => "2026-07-21T10:00:00.000Z");
+      const command = { idempotencyKey: "replay-key", requestType: "project.addExisting", requestHash: "hash-a", workerGeneration: "50000000-0000-4000-8000-000000000001" };
+      const project = { id: "10000000-0000-4000-8000-000000000001", repositoryRoot: "/repo", gitCommonDir: "/repo/.git", displayName: "repo", headOid: "a".repeat(40), defaultBranch: "main", createdAt: "2026-07-21T10:00:00.000Z" };
+
+      expect(dedupe.replay(command, ProjectSchema)).toBeUndefined();
+      dedupe.execute(command, ProjectSchema, () => project);
+      expect(dedupe.replay(command, ProjectSchema)).toEqual({ value: project, replayed: true });
+      expect(() => dedupe.replay({ ...command, requestHash: "hash-b" }, ProjectSchema)).toThrow(IdempotencyConflictError);
+
+      database.prepare("INSERT INTO idempotency_records(idempotency_key, request_type, request_hash, worker_generation, status, created_at) VALUES (?, ?, ?, ?, 'pending', ?)").run("pending-key", command.requestType, command.requestHash, command.workerGeneration, project.createdAt);
+      expect(() => dedupe.replay({ ...command, idempotencyKey: "pending-key" }, ProjectSchema)).toThrow(/Incomplete/);
+    } finally {
+      database.close();
+    }
+  });
 });

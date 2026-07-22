@@ -18,6 +18,7 @@ export interface DurableResult<T> {
 export class IdempotencyConflictError extends Error {}
 
 export interface IdempotencyStore {
+  replay<T>(command: DurableCommand, resultSchema: ZodType<T>): DurableResult<T> | undefined;
   execute<T>(command: DurableCommand, resultSchema: ZodType<T>, mutation: () => T): DurableResult<T>;
 }
 
@@ -26,19 +27,33 @@ export function hashWorkerCommand(command: WorkerCommand): string {
 }
 
 export function createIdempotencyStore(database: Database, now: () => string): IdempotencyStore {
+  const findRecord = database.prepare("SELECT request_type, request_hash, status, response_json FROM idempotency_records WHERE idempotency_key = ?");
+
+  const completedResult = <T>(
+    command: DurableCommand,
+    resultSchema: ZodType<T>,
+    existing: { request_type: string; request_hash: string; status: string; response_json: string | null }
+  ): DurableResult<T> => {
+    if (existing.request_type !== command.requestType || existing.request_hash !== command.requestHash) {
+      throw new IdempotencyConflictError(`Idempotency key conflict: ${command.idempotencyKey}`);
+    }
+    if (existing.status !== "completed" || existing.response_json === null) {
+      throw new Error(`Incomplete idempotency record: ${command.idempotencyKey}`);
+    }
+    return { value: resultSchema.parse(JSON.parse(existing.response_json)), replayed: true };
+  };
+
+  const replay = <T>(command: DurableCommand, resultSchema: ZodType<T>): DurableResult<T> | undefined => {
+      const existing = findRecord.get(command.idempotencyKey) as { request_type: string; request_hash: string; status: string; response_json: string | null } | undefined;
+      return existing === undefined ? undefined : completedResult(command, resultSchema, existing);
+  };
+
   return {
+    replay,
     execute(command, resultSchema, mutation) {
       return database.transaction(() => {
-        const existing = database.prepare("SELECT request_type, request_hash, status, response_json FROM idempotency_records WHERE idempotency_key = ?").get(command.idempotencyKey) as { request_type: string; request_hash: string; status: string; response_json: string | null } | undefined;
-        if (existing) {
-          if (existing.request_type !== command.requestType || existing.request_hash !== command.requestHash) {
-            throw new IdempotencyConflictError(`Idempotency key conflict: ${command.idempotencyKey}`);
-          }
-          if (existing.status !== "completed" || existing.response_json === null) {
-            throw new Error(`Incomplete idempotency record: ${command.idempotencyKey}`);
-          }
-          return { value: resultSchema.parse(JSON.parse(existing.response_json)), replayed: true };
-        }
+        const replayed = replay(command, resultSchema);
+        if (replayed) return replayed;
 
         const createdAt = now();
         database.prepare("INSERT INTO idempotency_records(idempotency_key, request_type, request_hash, worker_generation, status, created_at) VALUES (?, ?, ?, ?, 'pending', ?)").run(command.idempotencyKey, command.requestType, command.requestHash, command.workerGeneration, createdAt);

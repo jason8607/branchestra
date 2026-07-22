@@ -77,4 +77,109 @@ describe("foundation domain services", () => {
       database.close();
     }
   });
+
+  it("replays a completed project command before repository inspection", async () => {
+    const database = openDatabase(":memory:");
+    try {
+      runMigrations(database);
+      const repositories = createRepositories(database);
+      const dedupe = createIdempotencyStore(database, () => "2026-07-21T12:00:00.000Z");
+      let idCalls = 0;
+      let inspectorCalls = 0;
+      const ids = { next: () => {
+        idCalls += 1;
+        return "10000000-0000-4000-8000-000000000001";
+      } };
+      const metadata = {
+        idempotencyKey: "project-retry",
+        requestType: "project.addExisting",
+        requestHash: "project-retry-hash",
+        workerGeneration: "50000000-0000-4000-8000-000000000001"
+      };
+      const common = {
+        repositories,
+        idempotencyStore: dedupe,
+        clock: { now: () => "2026-07-21T12:00:00.000Z" },
+        ids
+      };
+      const firstService = createProjectService({
+        ...common,
+        inspectRepository: async () => {
+          inspectorCalls += 1;
+          return { repositoryRoot: "/repo", gitCommonDir: "/repo/.git", headOid: "a".repeat(40), defaultBranch: "main" };
+        }
+      });
+      const first = await firstService.addExistingProject({ selectedPath: "/chosen" }, metadata);
+      const retryService = createProjectService({
+        ...common,
+        inspectRepository: async () => {
+          inspectorCalls += 1;
+          throw new Error("inspector must not run for replay");
+        }
+      });
+
+      await expect(retryService.addExistingProject({ selectedPath: "/chosen" }, metadata)).resolves.toEqual({
+        value: first.value,
+        replayed: true
+      });
+      expect({ inspectorCalls, idCalls }).toEqual({ inspectorCalls: 1, idCalls: 1 });
+    } finally {
+      database.close();
+    }
+  });
+
+  it("rejects invalid or missing room dependencies without durable side effects", () => {
+    const database = openDatabase(":memory:");
+    try {
+      runMigrations(database);
+      const repositories = createRepositories(database);
+      const project = repositories.projects.insert({
+        id: "10000000-0000-4000-8000-000000000001",
+        repositoryRoot: "/repo",
+        gitCommonDir: "/repo/.git",
+        displayName: "repo",
+        headOid: "a".repeat(40),
+        defaultBranch: "main",
+        createdAt: "2026-07-21T12:00:00.000Z"
+      });
+      const ids = { calls: 0, next() { this.calls += 1; return "20000000-0000-4000-8000-000000000001"; } };
+      const rooms = createRoomService({
+        repositories,
+        eventStore: createEventStore(database, repositories),
+        idempotencyStore: createIdempotencyStore(database, () => "2026-07-21T12:00:00.000Z"),
+        clock: { now: () => "2026-07-21T12:00:00.000Z" },
+        ids
+      });
+      const metadata = (key: string, type: string) => ({
+        idempotencyKey: key,
+        requestType: type,
+        requestHash: `${key}-hash`,
+        workerGeneration: "50000000-0000-4000-8000-000000000001"
+      });
+
+      expect(() => rooms.createRoom(
+        { projectId: "10000000-0000-4000-8000-000000000002", title: "Valid" },
+        metadata("missing-project", "room.create")
+      )).toThrow(/Project not found/);
+      expect(() => rooms.createRoom(
+        { projectId: project.id, title: " " },
+        metadata("invalid-title", "room.create")
+      )).toThrow();
+      expect(() => rooms.postUserMessage(
+        { roomId: "20000000-0000-4000-8000-000000000002", body: "Valid" },
+        metadata("missing-room", "message.post")
+      )).toThrow(/Room not found/);
+      expect(() => rooms.postUserMessage(
+        { roomId: "20000000-0000-4000-8000-000000000002", body: " " },
+        metadata("invalid-body", "message.post")
+      )).toThrow();
+
+      expect(ids.calls).toBe(0);
+      expect(database.prepare("SELECT count(*) AS count FROM rooms").get()).toEqual({ count: 0 });
+      expect(database.prepare("SELECT count(*) AS count FROM room_events").get()).toEqual({ count: 0 });
+      expect(database.prepare("SELECT count(*) AS count FROM idempotency_records").get()).toEqual({ count: 0 });
+    } finally {
+      database.close();
+    }
+  });
 });
