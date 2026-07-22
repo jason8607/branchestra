@@ -136,8 +136,12 @@ function failureResponse(command: RendererCommand, message: string): WorkerRespo
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((fulfill) => { resolve = fulfill; });
-  return { promise, resolve };
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((fulfill, fail) => {
+    resolve = fulfill;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
 }
 
 function apiHarness(
@@ -391,7 +395,7 @@ describe("timeline store", () => {
     });
   });
 
-  it("rejects a different event that reuses an accepted room sequence", async () => {
+  it("ignores a different event that reuses an accepted room sequence", async () => {
     const fixture = timelineApiFixture({
       snapshot: foundationSnapshot(1),
       replayPages: [eventPage([messageEvent(1)], false)]
@@ -401,10 +405,7 @@ describe("timeline store", () => {
 
     fixture.emit(roomEventEnvelope(messageEvent(2, { roomSeq: 1 })));
 
-    expect(store.getState()).toMatchObject({
-      connection: "error",
-      error: "Conflicting event for room sequence 1"
-    });
+    expect(store.getState()).toMatchObject({ connection: "ready", error: null });
     expect(store.getState().eventsByRoom[ROOM_ID]?.map((event) => event.id)).toEqual([
       messageEvent(1).id
     ]);
@@ -637,7 +638,7 @@ describe("timeline store", () => {
     });
   });
 
-  it("rejects a reused event ID even when its sequence would otherwise be next", async () => {
+  it("deduplicates a reused event ID regardless of differing content", async () => {
     const fixture = timelineApiFixture({
       snapshot: foundationSnapshot(1),
       replayPages: [eventPage([messageEvent(1)], false)]
@@ -647,10 +648,7 @@ describe("timeline store", () => {
 
     fixture.emit(roomEventEnvelope(messageEvent(2, { id: messageEvent(1).id })));
 
-    expect(store.getState()).toMatchObject({
-      connection: "error",
-      error: `Conflicting event ID: ${messageEvent(1).id}`
-    });
+    expect(store.getState()).toMatchObject({ connection: "ready", error: null });
     expect(store.getState().eventsByRoom[ROOM_ID]).toHaveLength(1);
   });
 
@@ -698,6 +696,375 @@ describe("timeline store", () => {
     expect(store.getState()).toMatchObject({
       connection: "error",
       error: "Unable to load application state"
+    });
+  });
+
+  it("starts new-generation hydration without joining an old replay and ignores its rejection", async () => {
+    const nextGeneration = "50000000-0000-4000-8000-000000000002";
+    const oldReplay = deferred<WorkerResponseEnvelope>();
+    const commands: RendererCommand[] = [];
+    const listeners = new Set<(event: WorkerEventEnvelope) => void>();
+    let snapshotRequests = 0;
+    const api: BranchestraApi = {
+      async request(command) {
+        commands.push(command);
+        if (command.type === "state.getSnapshot") {
+          snapshotRequests += 1;
+          return successResponse(command, foundationSnapshot(snapshotRequests === 1 ? 1 : 0));
+        }
+        if (command.type === "room.replay") {
+          if (command.payload.roomSeq === 0 && snapshotRequests === 1) return oldReplay.promise;
+          return successResponse(command, eventPage([], false));
+        }
+        throw new Error(`Unexpected command: ${command.type}`);
+      },
+      subscribe(listener) {
+        listeners.add(listener);
+        return () => { listeners.delete(listener); };
+      }
+    };
+    const store = createTimelineStore(api, sequentialIds());
+    const oldHydration = store.hydrate();
+    for (let turn = 0; turn < 3; turn += 1) await Promise.resolve();
+
+    for (const listener of listeners) listener(workerEvent("worker.ready", nextGeneration));
+    for (let turn = 0; turn < 5; turn += 1) await Promise.resolve();
+
+    expect(commands.filter((command) => command.type === "state.getSnapshot")).toHaveLength(2);
+    oldReplay.reject(new Error("old replay failed"));
+    await oldHydration;
+    for (let turn = 0; turn < 5; turn += 1) await Promise.resolve();
+    expect(store.getState()).toMatchObject({ connection: "ready", error: null });
+  });
+
+  it("ignores a mutation rejection from an obsolete worker generation", async () => {
+    const nextGeneration = "50000000-0000-4000-8000-000000000002";
+    const oldMutation = deferred<WorkerResponseEnvelope>();
+    const fixture = apiHarness((command) => {
+      if (command.type === "state.getSnapshot") {
+        return successResponse(command, foundationSnapshot(0));
+      }
+      if (command.type === "room.replay") return successResponse(command, eventPage([], false));
+      if (command.type === "message.post") return oldMutation.promise;
+      throw new Error(`Unexpected command: ${command.type}`);
+    });
+    const store = createTimelineStore(fixture.api, sequentialIds());
+    const listener = vi.fn();
+    store.subscribe(listener);
+    await store.hydrate();
+    const posting = store.postMessage(ROOM_ID, "old generation");
+    await Promise.resolve();
+
+    fixture.emit(workerEvent("worker.ready", nextGeneration));
+    for (let turn = 0; turn < 20; turn += 1) {
+      await Promise.resolve();
+      const snapshots = fixture.commands.filter((command) => command.type === "state.getSnapshot");
+      if (snapshots.length === 2 && store.getState().connection === "ready") break;
+    }
+    expect(fixture.commands.filter((command) => command.type === "state.getSnapshot")).toHaveLength(2);
+    expect(store.getState().connection).toBe("ready");
+    const notificationsBeforeRejection = listener.mock.calls.length;
+    oldMutation.reject(new Error("obsolete mutation failed"));
+    await posting;
+
+    expect(store.getState()).toMatchObject({ connection: "ready", error: null });
+    expect(store.getState().eventsByRoom[ROOM_ID]).toBeUndefined();
+    expect(listener).toHaveBeenCalledTimes(notificationsBeforeRejection);
+  });
+
+  it("ignores a successful mutation response from an obsolete worker generation", async () => {
+    const nextGeneration = "50000000-0000-4000-8000-000000000002";
+    const oldMutation = deferred<WorkerResponseEnvelope>();
+    const fixture = apiHarness((command) => {
+      if (command.type === "state.getSnapshot") {
+        return successResponse(command, foundationSnapshot(0));
+      }
+      if (command.type === "room.replay") return successResponse(command, eventPage([], false));
+      if (command.type === "message.post") return oldMutation.promise;
+      throw new Error(`Unexpected command: ${command.type}`);
+    });
+    const store = createTimelineStore(fixture.api, sequentialIds());
+    await store.hydrate();
+    const posting = store.postMessage(ROOM_ID, "old success");
+    await Promise.resolve();
+    fixture.emit(workerEvent("worker.ready", nextGeneration));
+    for (let turn = 0; turn < 5; turn += 1) await Promise.resolve();
+    const postCommand = fixture.commands.find((command) => command.type === "message.post");
+    if (!postCommand) throw new Error("Expected old message mutation");
+
+    oldMutation.resolve(successResponse(postCommand, messageEvent(1)));
+    await posting;
+
+    expect(store.getState()).toMatchObject({ connection: "ready", error: null });
+    expect(store.getState().eventsByRoom[ROOM_ID]).toBeUndefined();
+  });
+
+  it("starts a fresh snapshot after a successful project mutation instead of joining an older hydrate", async () => {
+    const preMutationSnapshot = deferred<WorkerResponseEnvelope>();
+    const addedProject = project("10000000-0000-4000-8000-000000000002");
+    let snapshotRequests = 0;
+    const fixture = apiHarness((command) => {
+      if (command.type === "state.getSnapshot") {
+        snapshotRequests += 1;
+        if (snapshotRequests === 1) return preMutationSnapshot.promise;
+        return successResponse(command, {
+          projects: [project(), addedProject],
+          rooms: [room()],
+          roomCursors: { [ROOM_ID]: 0 }
+        });
+      }
+      if (command.type === "room.replay") return successResponse(command, eventPage([], false));
+      if (command.type === "project.pickExisting") return successResponse(command, addedProject);
+      throw new Error(`Unexpected command: ${command.type}`);
+    });
+    const store = createTimelineStore(fixture.api, sequentialIds());
+    const oldHydration = store.hydrate();
+    await Promise.resolve();
+    const adding = store.addProject();
+    for (let turn = 0; turn < 3; turn += 1) await Promise.resolve();
+    const firstSnapshotCommand = fixture.commands.find((command) => (
+      command.type === "state.getSnapshot"
+    ));
+    if (!firstSnapshotCommand) throw new Error("Expected pre-mutation snapshot request");
+
+    preMutationSnapshot.resolve(successResponse(firstSnapshotCommand, foundationSnapshot(0)));
+    await Promise.all([oldHydration, adding]);
+
+    expect(snapshotRequests).toBe(2);
+    expect(store.getState().snapshot.projects).toEqual([project(), addedProject]);
+  });
+
+  it("sets an error and rejects selectRoom when its replay response fails", async () => {
+    const roomTwo = room("20000000-0000-4000-8000-000000000002");
+    const fixture = apiHarness((command) => {
+      if (command.type === "state.getSnapshot") {
+        return successResponse(command, {
+          projects: [project()],
+          rooms: [room(), roomTwo],
+          roomCursors: { [ROOM_ID]: 0, [roomTwo.id]: 0 }
+        });
+      }
+      if (command.type === "room.replay" && command.payload.roomId === ROOM_ID) {
+        return successResponse(command, eventPage([], false));
+      }
+      if (command.type === "room.replay") return failureResponse(command, "Replay unavailable");
+      throw new Error(`Unexpected command: ${command.type}`);
+    });
+    const store = createTimelineStore(fixture.api, sequentialIds());
+    await store.hydrate();
+
+    await expect(store.selectRoom(roomTwo.id)).rejects.toThrow("Replay unavailable");
+
+    expect(store.getState()).toMatchObject({
+      connection: "error",
+      error: "Replay unavailable",
+      selectedRoomId: roomTwo.id
+    });
+  });
+
+  it("performs no API or ID-generator side effects for public commands after disposal", async () => {
+    const fixture = apiHarness((command) => {
+      if (command.type === "state.getSnapshot") {
+        return successResponse(command, foundationSnapshot(0));
+      }
+      if (command.type === "room.replay") return successResponse(command, eventPage([], false));
+      throw new Error(`Unexpected command after setup: ${command.type}`);
+    });
+    const nextId = vi.fn(sequentialIds());
+    const store = createTimelineStore(fixture.api, nextId);
+    await store.hydrate();
+    store.dispose();
+    fixture.commands.length = 0;
+    nextId.mockClear();
+
+    await store.hydrate();
+    await store.selectRoom(ROOM_ID);
+    await store.addProject();
+    await store.createRoom(PROJECT_ID, "Later");
+    await store.postMessage(ROOM_ID, "Later");
+
+    expect(fixture.commands).toEqual([]);
+    expect(nextId).not.toHaveBeenCalled();
+  });
+
+  it("rejects a replay page containing an event for a different room", async () => {
+    const otherRoomId = "20000000-0000-4000-8000-000000000002";
+    const otherRoomEvent = messageEvent(1, {
+      roomId: otherRoomId,
+      payload: { ...messageEvent(1).payload, roomId: otherRoomId }
+    });
+    const fixture = timelineApiFixture({
+      snapshot: foundationSnapshot(0),
+      replayPages: [{ ...eventPage([otherRoomEvent], false), roomId: ROOM_ID }]
+    });
+    const store = createTimelineStore(fixture.api, sequentialIds());
+
+    await store.hydrate();
+
+    expect(store.getState()).toMatchObject({
+      connection: "error",
+      error: "Replay event room does not match request"
+    });
+    expect(store.getState().eventsByRoom).toEqual({});
+  });
+
+  it("rejects a replay page whose next cursor lies about its event tail", async () => {
+    const fixture = timelineApiFixture({
+      snapshot: foundationSnapshot(1),
+      replayPages: [{ ...eventPage([messageEvent(1)], false), nextRoomSeq: 2 }]
+    });
+    const store = createTimelineStore(fixture.api, sequentialIds());
+
+    await store.hydrate();
+
+    expect(store.getState()).toMatchObject({
+      connection: "error",
+      error: "Replay nextRoomSeq does not match page tail"
+    });
+    expect(store.getState().eventsByRoom).toEqual({});
+  });
+
+  it("continues notifying and hydrating when one store subscriber throws", async () => {
+    const fixture = timelineApiFixture({
+      snapshot: foundationSnapshot(0),
+      replayPages: [eventPage([], false)]
+    });
+    const laterListener = vi.fn();
+    const store = createTimelineStore(fixture.api, sequentialIds());
+    store.subscribe(() => { throw new Error("subscriber failed"); });
+    store.subscribe(laterListener);
+
+    await store.hydrate();
+
+    expect(fixture.replayCursors).toEqual([0]);
+    expect(laterListener).toHaveBeenCalled();
+    expect(store.getState()).toMatchObject({ connection: "ready", error: null });
+  });
+
+  it("invalidates pending mutation failures as soon as the worker disconnects", async () => {
+    const mutation = deferred<WorkerResponseEnvelope>();
+    const fixture = apiHarness((command) => {
+      if (command.type === "state.getSnapshot") {
+        return successResponse(command, foundationSnapshot(0));
+      }
+      if (command.type === "room.replay") return successResponse(command, eventPage([], false));
+      if (command.type === "message.post") return mutation.promise;
+      throw new Error(`Unexpected command: ${command.type}`);
+    });
+    const store = createTimelineStore(fixture.api, sequentialIds());
+    await store.hydrate();
+    const posting = store.postMessage(ROOM_ID, "pending");
+    await Promise.resolve();
+
+    fixture.emit(workerEvent("worker.disconnected", GENERATION));
+    mutation.reject(new Error("disconnected mutation failed"));
+    await posting;
+
+    expect(store.getState()).toMatchObject({ connection: "reconnecting", error: null });
+  });
+
+  it("refreshes after a room mutation that races an older hydrate before selecting the room", async () => {
+    const preMutationSnapshot = deferred<WorkerResponseEnvelope>();
+    const createdRoom = room("20000000-0000-4000-8000-000000000002");
+    let snapshotRequests = 0;
+    const fixture = apiHarness((command) => {
+      if (command.type === "state.getSnapshot") {
+        snapshotRequests += 1;
+        if (snapshotRequests === 1) return preMutationSnapshot.promise;
+        return successResponse(command, {
+          projects: [project()],
+          rooms: [room(), createdRoom],
+          roomCursors: { [ROOM_ID]: 0, [createdRoom.id]: 0 }
+        });
+      }
+      if (command.type === "room.replay") {
+        return successResponse(command, {
+          roomId: command.payload.roomId,
+          events: [],
+          nextRoomSeq: command.payload.roomSeq,
+          hasMore: false
+        });
+      }
+      if (command.type === "room.create") return successResponse(command, createdRoom);
+      throw new Error(`Unexpected command: ${command.type}`);
+    });
+    const store = createTimelineStore(fixture.api, sequentialIds());
+    const oldHydration = store.hydrate();
+    await Promise.resolve();
+    const creating = store.createRoom(PROJECT_ID, "Fresh room");
+    for (let turn = 0; turn < 3; turn += 1) await Promise.resolve();
+    const firstSnapshotCommand = fixture.commands.find((command) => (
+      command.type === "state.getSnapshot"
+    ));
+    if (!firstSnapshotCommand) throw new Error("Expected pre-mutation snapshot request");
+
+    preMutationSnapshot.resolve(successResponse(firstSnapshotCommand, foundationSnapshot(0)));
+    await Promise.all([oldHydration, creating]);
+
+    expect(snapshotRequests).toBe(2);
+    expect(store.getState()).toMatchObject({
+      connection: "ready",
+      selectedRoomId: createdRoom.id
+    });
+  });
+
+  it("rejects a replay page labeled for a different room", async () => {
+    const otherRoomId = "20000000-0000-4000-8000-000000000002";
+    const fixture = timelineApiFixture({
+      snapshot: foundationSnapshot(0),
+      replayPages: [{ ...eventPage([], false), roomId: otherRoomId }]
+    });
+    const store = createTimelineStore(fixture.api, sequentialIds());
+
+    await store.hydrate();
+
+    expect(store.getState()).toMatchObject({
+      connection: "error",
+      error: "Replay response room does not match request"
+    });
+  });
+
+  it("rejects a replay cursor that regresses behind the requested sequence", async () => {
+    const fixture = timelineApiFixture({
+      snapshot: foundationSnapshot(1),
+      replayPages: [eventPage([messageEvent(1)], false)]
+    });
+    const store = createTimelineStore(fixture.api, sequentialIds());
+    await store.hydrate();
+    fixture.queueReplay(eventPage([], false));
+
+    await expect(store.selectRoom(ROOM_ID)).rejects.toThrow("Replay nextRoomSeq regressed");
+
+    expect(store.getState()).toMatchObject({
+      connection: "error",
+      error: "Replay nextRoomSeq regressed"
+    });
+    expect(store.getState().eventsByRoom[ROOM_ID]).toHaveLength(1);
+  });
+
+  it("sets a safe error and rejects selectRoom when replay data fails schema parsing", async () => {
+    const roomTwo = room("20000000-0000-4000-8000-000000000002");
+    const fixture = apiHarness((command) => {
+      if (command.type === "state.getSnapshot") {
+        return successResponse(command, {
+          projects: [project()],
+          rooms: [room(), roomTwo],
+          roomCursors: { [ROOM_ID]: 0, [roomTwo.id]: 0 }
+        });
+      }
+      if (command.type === "room.replay" && command.payload.roomId === ROOM_ID) {
+        return successResponse(command, eventPage([], false));
+      }
+      if (command.type === "room.replay") return successResponse(command, project());
+      throw new Error(`Unexpected command: ${command.type}`);
+    });
+    const store = createTimelineStore(fixture.api, sequentialIds());
+    await store.hydrate();
+
+    await expect(store.selectRoom(roomTwo.id)).rejects.toThrow("Unable to replay room events");
+    expect(store.getState()).toMatchObject({
+      connection: "error",
+      error: "Unable to replay room events"
     });
   });
 });
