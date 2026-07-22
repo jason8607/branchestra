@@ -13,7 +13,7 @@
 - Use exactly Node.js `24.18.0` and declare it in `.nvmrc` and `package.json#engines.node`.
 - Use exactly pnpm `11.15.1` and declare `packageManager: "pnpm@11.15.1"`.
 - Pin Electron `43.1.1`, electron-vite `5.0.0`, React and React DOM `19.2.7`, Vite `8.1.5`, `@vitejs/plugin-react` `6.0.3`, TypeScript `7.0.2`, Zod `4.4.3`, Vitest `4.1.10`, and `@playwright/test` `1.61.1` without ranges.
-- Pin ESLint/`@eslint/js` `10.6.0`, `typescript-eslint` `8.65.0`, `globals` `17.7.0`, Testing Library React/DOM/User Event `16.3.2`/`10.4.1`/`14.6.1`, and jsdom `29.1.1` without ranges; later milestones consume these existing tools rather than installing them after first use.
+- Pin ESLint `10.6.0`, `@eslint/js` `10.0.1`, `typescript-eslint` `8.65.0`, `globals` `17.7.0`, Testing Library React/DOM/User Event `16.3.2`/`10.4.1`/`14.6.1`, and jsdom `29.1.1` without ranges; later milestones consume these existing tools rather than installing them after first use.
 - Keep one package, ESM (`"type": "module"`), strict TypeScript, `noUncheckedIndexedAccess`, and `exactOptionalPropertyTypes`.
 - Keep source roots exactly under `src/main`, `src/preload`, `src/renderer`, `src/worker`, and `src/shared/contracts`; keep tests under `tests/unit`, `tests/integration`, `tests/fixtures`, and `e2e`.
 - Use Electron security defaults explicitly: `contextIsolation: true`, `nodeIntegration: false`, `sandbox: true`, no `<webview>`, denied navigation, and denied new windows.
@@ -122,7 +122,7 @@ Create `.nvmrc` with `24.18.0`, create `.gitignore` with `node_modules`, `out`, 
     "zod": "4.4.3"
   },
   "devDependencies": {
-    "@eslint/js": "10.6.0",
+    "@eslint/js": "10.0.1",
     "@playwright/test": "1.61.1",
     "@testing-library/dom": "10.4.1",
     "@testing-library/react": "16.3.2",

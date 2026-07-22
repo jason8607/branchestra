@@ -52,7 +52,7 @@ Every implementation plan uses exact versions. Upgrade them only in a dedicated 
 | Testing Library React / DOM | `16.3.2` / `10.4.1` | Renderer unit tests driven by accessible behavior. |
 | jsdom | `29.1.1` | DOM environment for focused Renderer unit tests. |
 | Testing Library User Event | `14.6.1` | Accessible interaction tests. |
-| ESLint / `@eslint/js` | `10.6.0` / `10.6.0` | Static checks and Renderer import-boundary enforcement. |
+| ESLint / `@eslint/js` | `10.6.0` / `10.0.1` | Static checks and Renderer import-boundary enforcement. |
 | `typescript-eslint` | `8.65.0` | TypeScript-aware flat ESLint configuration. |
 | `globals` | `17.7.0` | Explicit Node/browser globals for flat ESLint config. |
 | Claude Agent SDK | `0.3.216` | Claude adapter, always pointed at an external user-installed CLI. |
