@@ -190,6 +190,19 @@ describe("worker runtime lease", () => {
         payload: expect.objectContaining({ ok: false, requestType: "room.create", code: "INVALID_REQUEST" })
       }));
       port.emit({
+        ...prepareQuitRequest("50000000-0000-4000-8000-000000000099"),
+        requestId: "10000000-0000-4000-8000-000000000003",
+        idempotencyKey: "stale-malformed-request",
+        type: "room.create",
+        payload: {}
+      });
+      await flushMessages();
+      expect(port.sent).toContainEqual(expect.objectContaining({
+        requestId: "10000000-0000-4000-8000-000000000003",
+        workerGeneration: generation,
+        payload: expect.objectContaining({ ok: false, code: "INVALID_REQUEST" })
+      }));
+      port.emit({
         ...prepareQuitRequest(generation),
         requestId: "10000000-0000-4000-8000-000000000002",
         idempotencyKey: "oversized-request",
@@ -280,6 +293,35 @@ describe("worker runtime lease", () => {
       await heartbeatRuntime?.prepareQuit(Date.now() + 1_000);
       vi.restoreAllMocks();
       vi.useRealTimers();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("closes the raw database when migrations or lease acquisition fail", async () => {
+    const root = mkdtempSync(join(tmpdir(), "branchestra-worker-"));
+    const dbPath = join(root, "branchestra.sqlite3");
+    const originalExec = DatabaseSync.prototype.exec;
+    const originalPrepare = DatabaseSync.prototype.prepare;
+    const closeSpy = vi.spyOn(DatabaseSync.prototype, "close");
+    try {
+      const migrationSpy = vi.spyOn(DatabaseSync.prototype, "exec").mockImplementation(function (this: DatabaseSync, sql: string) {
+        if (sql.startsWith("CREATE TABLE IF NOT EXISTS schema_migrations")) throw new Error("migration failed");
+        return originalExec.call(this, sql);
+      });
+      await expect(startWorker(startOptions(dbPath, fakePort(), "50000000-0000-4000-8000-000000000060", 160))).rejects.toThrow("migration failed");
+      expect(closeSpy).toHaveBeenCalledTimes(1);
+      migrationSpy.mockRestore();
+      closeSpy.mockClear();
+
+      const acquisitionSpy = vi.spyOn(DatabaseSync.prototype, "prepare").mockImplementation(function (this: DatabaseSync, sql: string) {
+        if (sql.startsWith("SELECT owner_instance_id")) throw new Error("acquisition failed");
+        return originalPrepare.call(this, sql);
+      });
+      await expect(startWorker(startOptions(dbPath, fakePort(), "50000000-0000-4000-8000-000000000061", 161))).rejects.toThrow("acquisition failed");
+      expect(closeSpy).toHaveBeenCalledTimes(1);
+      acquisitionSpy.mockRestore();
+    } finally {
+      vi.restoreAllMocks();
       rmSync(root, { recursive: true, force: true });
     }
   });

@@ -6,8 +6,7 @@ import {
   PROTOCOL_VERSION,
   WorkerEventEnvelopeSchema,
   WorkerRequestEnvelopeSchema,
-  WorkerResponseEnvelopeSchema,
-  ZERO_WORKER_GENERATION
+  WorkerResponseEnvelopeSchema
 } from "../shared/contracts/protocol";
 import { createProjectService } from "./domain/project-service";
 import { createRoomService } from "./domain/room-service";
@@ -44,7 +43,6 @@ const SafeCorrelationSchema = z.object({
   v: z.literal(PROTOCOL_VERSION),
   requestId: z.string().uuid(),
   idempotencyKey: z.string().min(1).max(128),
-  workerGeneration: z.string().uuid().refine((value) => value !== ZERO_WORKER_GENERATION),
   type: z.string().min(1)
 }).passthrough();
 
@@ -64,15 +62,15 @@ function handshakeEnvelope(
   });
 }
 
-function invalidRequestResponse(value: unknown): unknown | undefined {
+function invalidRequestResponse(value: unknown, activeWorkerGeneration: string): unknown | undefined {
   const correlation = SafeCorrelationSchema.safeParse(value);
   if (!correlation.success) return undefined;
-  const { v, requestId, idempotencyKey, workerGeneration, type } = correlation.data;
+  const { v, requestId, idempotencyKey, type } = correlation.data;
   return WorkerResponseEnvelopeSchema.parse({
     v,
     requestId,
     idempotencyKey,
-    workerGeneration,
+    workerGeneration: activeWorkerGeneration,
     type: "response",
     payload: {
       ok: false,
@@ -89,9 +87,23 @@ function stoppedRuntime(): WorkerRuntime {
 
 export async function startWorker(options: WorkerStartOptions): Promise<WorkerRuntime> {
   const database = openDatabase(options.dbPath);
-  runMigrations(database);
-  const leaseStore = createWorkerLeaseStore(database);
-  if (leaseStore.acquire(options.identity, Date.now(), options.leaseTtlMs) === "held") {
+  let leaseHeld = false;
+  const leaseStore = (() => {
+    try {
+      runMigrations(database);
+      const store = createWorkerLeaseStore(database);
+      leaseHeld = store.acquire(options.identity, Date.now(), options.leaseTtlMs) === "held";
+      return store;
+    } catch (error) {
+      try {
+        database.close();
+      } catch {
+        // Preserve the original migration or acquisition error.
+      }
+      throw error;
+    }
+  })();
+  if (leaseHeld) {
     try {
       options.port.postMessage(handshakeEnvelope("worker.rejected", options.identity));
     } finally {
@@ -174,7 +186,7 @@ export async function startWorker(options: WorkerStartOptions): Promise<WorkerRu
           assertEnvelopeSize(value);
           request = WorkerRequestEnvelopeSchema.parse(value);
         } catch {
-          const response = invalidRequestResponse(value);
+          const response = invalidRequestResponse(value, options.identity.workerGeneration);
           if (response === undefined) {
             stopQuietly();
             return;

@@ -1,15 +1,7 @@
 import { startWorker, type WorkerPort } from "./runtime";
+import { parseWorkerEnvironment } from "./entry-environment";
 
-function requiredEnvironment(name: string): string {
-  const value = process.env[name];
-  if (!value) throw new Error(`Missing required environment variable: ${name}`);
-  return value;
-}
-
-const dbPath = requiredEnvironment("BRANCHESTRA_DB_PATH");
-const ownerInstanceId = requiredEnvironment("BRANCHESTRA_OWNER_INSTANCE_ID");
-const workerGeneration = requiredEnvironment("BRANCHESTRA_WORKER_GENERATION");
-const startIdentity = requiredEnvironment("BRANCHESTRA_WORKER_START_IDENTITY");
+const environment = parseWorkerEnvironment(process.env);
 const parentPort = process.parentPort;
 if (!parentPort) throw new Error("Worker utility process requires process.parentPort");
 
@@ -25,9 +17,14 @@ const port: WorkerPort = {
 };
 
 void startWorker({
-  dbPath,
+  dbPath: environment.dbPath,
   port,
-  identity: { ownerInstanceId, workerGeneration, pid: process.pid, startIdentity },
+  identity: {
+    ownerInstanceId: environment.ownerInstanceId,
+    workerGeneration: environment.workerGeneration,
+    pid: process.pid,
+    startIdentity: environment.startIdentity
+  },
   leaseTtlMs: 5_000,
   heartbeatIntervalMs: 1_000
 });
