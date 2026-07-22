@@ -73,6 +73,15 @@ describe("transitionTask system transitions", () => {
     });
   });
 
+  it("rejects an initial scope budget above two and emits only canonical transition facts", () => {
+    expect(() => transitionTask(task("AwaitingApproval"), {
+      type: "approveScope", receiptId: "receipt-1", collaborationRoundBudget: 3
+    })).toThrow("INITIAL_COLLABORATION_ROUND_BUDGET_INVALID");
+    expect(transitionTask(task("Preparing"), { type: "preparationSucceeded" }).event).toEqual({
+      type: "task.transitioned", payload: { taskId: "task-1", from: "Preparing", to: "Working", version: 2 }
+    });
+  });
+
   it("requires an explicit additional-round receipt before reusing Review2", () => {
     const revision = task("Revision", { collaborationRoundsUsed: 2 });
     expect(() => transitionTask(revision, {

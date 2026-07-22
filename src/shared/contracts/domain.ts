@@ -34,6 +34,9 @@ export type TaskState = typeof TASK_STATES[number];
 export type AgentProvider = "claude" | "codex";
 export type AgentRole = "lead" | "collaborator" | "reviewer";
 export type GitOid = string;
+export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
+type InitialCollaborationRoundBudget = 0 | 1 | 2;
+type AdditionalRounds = 1 | 2;
 
 export interface TaskCapabilityScope {
   repositoryRootRealpath: string;
@@ -43,7 +46,7 @@ export interface TaskCapabilityScope {
   allowCollaborator: boolean;
   toolNetwork: boolean;
   maxRunMs: number;
-  collaborationRoundBudget: number;
+  collaborationRoundBudget: InitialCollaborationRoundBudget;
 }
 
 export interface FinalApprovalTuple {
@@ -54,29 +57,21 @@ export interface FinalApprovalTuple {
   testSetHash: `sha256:${string}`;
 }
 
-export interface ApprovalReceipt {
-  id: string;
-  requestId: string;
-  taskId: string;
-  kind: "task_scope" | "additional_round" | "external_operation" | "final_merge";
-  decision: "approved" | "rejected";
-  scope: TaskCapabilityScope | FinalApprovalTuple | { additionalRounds: number } | { operation: string };
-  scopeHash: `sha256:${string}`;
-  workerGeneration: string;
-  survivesWorkerRestart: boolean;
-  decidedAt: string;
-}
+type ApprovalKindScope =
+  | { kind: "task_scope"; scope: TaskCapabilityScope }
+  | { kind: "additional_round"; scope: { additionalRounds: AdditionalRounds } }
+  | { kind: "external_operation"; scope: { operation: string } }
+  | { kind: "final_merge"; scope: FinalApprovalTuple };
 
-export interface ApprovalRequest {
-  id: string;
-  taskId: string;
-  kind: ApprovalReceipt["kind"];
-  scope: ApprovalReceipt["scope"];
-  scopeHash: `sha256:${string}`;
-  requestedGeneration: string;
-  status: "pending" | "decided";
-  requestedAt: string;
-}
+export type ApprovalReceipt = ApprovalKindScope & {
+  id: string; requestId: string; taskId: string; decision: "approved" | "rejected";
+  scopeHash: `sha256:${string}`; workerGeneration: string; survivesWorkerRestart: boolean; decidedAt: string;
+};
+
+export type ApprovalRequest = ApprovalKindScope & {
+  id: string; taskId: string; scopeHash: `sha256:${string}`; requestedGeneration: string;
+  status: "pending" | "decided"; requestedAt: string;
+};
 
 export interface TaskRecord {
   id: string;
@@ -122,10 +117,14 @@ export type TaskAction =
   | { type: "beginReconciliation" }
   | { type: "resumeRecordedPhase"; target: TaskRecord["interruptedFromState"] | "Completed" | "HumanApproval" | "Cancelled" };
 
+export type TaskTransitionEvent =
+  | { type: "task.transitioned"; payload: { taskId: string; from: TaskState; to: TaskState; version: number } }
+  | { type: "task.interrupted"; payload: { taskId: string; from: Exclude<TaskState, "Completed" | "Cancelled" | "Failed">; workerGeneration: string } };
+
 export interface TaskTransition {
   previous: TaskRecord;
   next: TaskRecord;
-  event: { type: `task.${string}`; payload: Record<string, unknown> };
+  event: TaskTransitionEvent;
 }
 
 export interface AgentRunRecord {
@@ -162,7 +161,7 @@ export interface IntegrationCandidate {
 export interface RecoveryOperationPreview {
   operationId: string; operationType: string;
   outcome: "not_applied" | "applied" | "conflict" | "uncertain";
-  expected: Record<string, unknown>; actual: Record<string, unknown>;
+  expected: { [key: string]: JsonValue }; actual: { [key: string]: JsonValue };
 }
 export interface RecoveryPreview {
   taskId: string; recordedPhase: TaskRecord["interruptedFromState"];
@@ -178,7 +177,7 @@ export type TaskProviderEventSummary =
   | { type: "workspace.writeText"; relativePath: string; contentHash: `sha256:${string}` }
   | { type: "test.request"; commandId: string }
   | { type: "collaborator.request"; purpose: "parallel_implementation" | "review" }
-  | { type: "review.findings"; checkpointOid: string; findings: string[] }
+  | { type: "review.findings"; checkpointOid: GitOid; findings: string[] }
   | { type: "run.completed"; summary: string }
   | { type: "run.failed"; code: string; message: string };
 
@@ -199,29 +198,31 @@ const TaskCapabilityScopeSchema = z.object({
   repositoryRootRealpath: z.string().min(1), gitCommonDirRealpath: z.string().min(1),
   writableRootsRealpath: z.array(z.string().min(1)), commandClasses: z.array(z.enum(["build", "test", "lint", "format"])),
   allowCollaborator: z.boolean(), toolNetwork: z.boolean(), maxRunMs: z.number().int().positive(),
-  collaborationRoundBudget: NonNegativeIntegerSchema
+  collaborationRoundBudget: z.union([z.literal(0), z.literal(1), z.literal(2)])
 }).strict();
 const FinalApprovalTupleSchema = z.object({
   targetRef: TargetRefSchema, baseOid: GitOidSchema, candidateOid: GitOidSchema,
   diffHash: Sha256Schema, testSetHash: Sha256Schema
 }).strict();
-const ApprovalScopeSchema = z.union([
-  TaskCapabilityScopeSchema, FinalApprovalTupleSchema,
-  z.object({ additionalRounds: NonNegativeIntegerSchema }).strict(),
-  z.object({ operation: z.string().min(1) }).strict()
+const AdditionalRoundsSchema = z.union([z.literal(1), z.literal(2)]);
+const approvalScopeBranches = {
+  task_scope: TaskCapabilityScopeSchema,
+  additional_round: z.object({ additionalRounds: AdditionalRoundsSchema }).strict(),
+  external_operation: z.object({ operation: z.string().min(1) }).strict(),
+  final_merge: FinalApprovalTupleSchema
+} as const;
+const ApprovalReceiptSchema = z.discriminatedUnion("kind", [
+  z.object({ id: z.string().min(1), requestId: z.string().min(1), taskId: z.string().min(1), kind: z.literal("task_scope"), scope: approvalScopeBranches.task_scope, decision: z.enum(["approved", "rejected"]), scopeHash: Sha256Schema, workerGeneration: z.string().min(1), survivesWorkerRestart: z.boolean(), decidedAt: TimestampSchema }).strict(),
+  z.object({ id: z.string().min(1), requestId: z.string().min(1), taskId: z.string().min(1), kind: z.literal("additional_round"), scope: approvalScopeBranches.additional_round, decision: z.enum(["approved", "rejected"]), scopeHash: Sha256Schema, workerGeneration: z.string().min(1), survivesWorkerRestart: z.boolean(), decidedAt: TimestampSchema }).strict(),
+  z.object({ id: z.string().min(1), requestId: z.string().min(1), taskId: z.string().min(1), kind: z.literal("external_operation"), scope: approvalScopeBranches.external_operation, decision: z.enum(["approved", "rejected"]), scopeHash: Sha256Schema, workerGeneration: z.string().min(1), survivesWorkerRestart: z.boolean(), decidedAt: TimestampSchema }).strict(),
+  z.object({ id: z.string().min(1), requestId: z.string().min(1), taskId: z.string().min(1), kind: z.literal("final_merge"), scope: approvalScopeBranches.final_merge, decision: z.enum(["approved", "rejected"]), scopeHash: Sha256Schema, workerGeneration: z.string().min(1), survivesWorkerRestart: z.boolean(), decidedAt: TimestampSchema }).strict()
 ]);
-const ApprovalReceiptSchema = z.object({
-  id: z.string().min(1), requestId: z.string().min(1), taskId: z.string().min(1),
-  kind: z.enum(["task_scope", "additional_round", "external_operation", "final_merge"]),
-  decision: z.enum(["approved", "rejected"]), scope: ApprovalScopeSchema, scopeHash: Sha256Schema,
-  workerGeneration: z.string().min(1), survivesWorkerRestart: z.boolean(), decidedAt: TimestampSchema
-}).strict();
-const ApprovalRequestSchema = z.object({
-  id: z.string().min(1), taskId: z.string().min(1),
-  kind: z.enum(["task_scope", "additional_round", "external_operation", "final_merge"]),
-  scope: ApprovalScopeSchema, scopeHash: Sha256Schema, requestedGeneration: z.string().min(1),
-  status: z.enum(["pending", "decided"]), requestedAt: TimestampSchema
-}).strict();
+const ApprovalRequestSchema = z.discriminatedUnion("kind", [
+  z.object({ id: z.string().min(1), taskId: z.string().min(1), kind: z.literal("task_scope"), scope: approvalScopeBranches.task_scope, scopeHash: Sha256Schema, requestedGeneration: z.string().min(1), status: z.enum(["pending", "decided"]), requestedAt: TimestampSchema }).strict(),
+  z.object({ id: z.string().min(1), taskId: z.string().min(1), kind: z.literal("additional_round"), scope: approvalScopeBranches.additional_round, scopeHash: Sha256Schema, requestedGeneration: z.string().min(1), status: z.enum(["pending", "decided"]), requestedAt: TimestampSchema }).strict(),
+  z.object({ id: z.string().min(1), taskId: z.string().min(1), kind: z.literal("external_operation"), scope: approvalScopeBranches.external_operation, scopeHash: Sha256Schema, requestedGeneration: z.string().min(1), status: z.enum(["pending", "decided"]), requestedAt: TimestampSchema }).strict(),
+  z.object({ id: z.string().min(1), taskId: z.string().min(1), kind: z.literal("final_merge"), scope: approvalScopeBranches.final_merge, scopeHash: Sha256Schema, requestedGeneration: z.string().min(1), status: z.enum(["pending", "decided"]), requestedAt: TimestampSchema }).strict()
+]);
 const TaskRecordSchema = z.object({
   id: z.string().min(1), roomId: z.string().min(1), projectId: z.string().min(1), requestEventId: z.string().min(1),
   requestText: z.string(), leadProvider: z.enum(["claude", "codex"]), targetRef: TargetRefSchema, baseOid: GitOidSchema,
@@ -251,6 +252,9 @@ const TestResultRecordSchema = z.object({
   executableRealpath: z.string().min(1), argv: z.array(z.string()), exitCode: z.number().int(), stdoutHash: Sha256Schema,
   stderrHash: Sha256Schema, durationMs: NonNegativeIntegerSchema, logReference: z.string().min(1), createdAt: TimestampSchema
 }).strict();
+const JsonValueSchema: z.ZodType<JsonValue> = z.lazy(() => z.union([
+  z.string(), z.number(), z.boolean(), z.null(), z.array(JsonValueSchema), z.record(z.string(), JsonValueSchema)
+]));
 const GitDiffFileSummarySchema = z.object({ path: z.string().min(1), status: z.string().min(1), additions: NonNegativeIntegerSchema, deletions: NonNegativeIntegerSchema }).strict();
 const IntegrationCandidateSchema = z.object({
   id: z.string().min(1), taskId: z.string().min(1), leadWorktreeId: z.string().min(1), targetRef: TargetRefSchema,
@@ -262,7 +266,7 @@ const IntegrationCandidateSchema = z.object({
 }).strict();
 const RecoveryOperationPreviewSchema = z.object({
   operationId: z.string().min(1), operationType: z.string().min(1), outcome: z.enum(["not_applied", "applied", "conflict", "uncertain"]),
-  expected: z.record(z.string(), z.unknown()), actual: z.record(z.string(), z.unknown())
+  expected: z.record(z.string(), JsonValueSchema), actual: z.record(z.string(), JsonValueSchema)
 }).strict();
 const RecoveryPreviewSchema = z.object({
   taskId: z.string().min(1), recordedPhase: NonTerminalTaskStateSchema.nullable(), repositoryAvailable: z.boolean(),
@@ -274,7 +278,7 @@ const TaskProviderEventSummarySchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("workspace.writeText"), relativePath: z.string().min(1), contentHash: Sha256Schema }).strict(),
   z.object({ type: z.literal("test.request"), commandId: z.string().min(1) }).strict(),
   z.object({ type: z.literal("collaborator.request"), purpose: z.enum(["parallel_implementation", "review"]) }).strict(),
-  z.object({ type: z.literal("review.findings"), checkpointOid: z.string().min(1), findings: z.array(z.string()) }).strict(),
+  z.object({ type: z.literal("review.findings"), checkpointOid: GitOidSchema, findings: z.array(z.string()) }).strict(),
   z.object({ type: z.literal("run.completed"), summary: z.string() }).strict(),
   z.object({ type: z.literal("run.failed"), code: z.string().min(1), message: z.string().min(1) }).strict()
 ]);
