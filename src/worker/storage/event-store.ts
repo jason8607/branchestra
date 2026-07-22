@@ -12,7 +12,7 @@ import {
 import { MAX_IPC_BYTES, encodedEnvelopeBytes } from "../../shared/contracts/protocol";
 import { NotFoundError } from "../domain/errors";
 import type { Database } from "./database";
-import { bindRepositoryEventStore, type EventStoreRepositories } from "./repositories";
+import type { EventStoreRepositories } from "./repositories";
 
 export type AppendRoomEventInput = RoomEvent extends infer TEvent
   ? TEvent extends RoomEvent
@@ -26,7 +26,24 @@ export interface EventStore {
   after(cursor: RoomEventCursor): RoomEventPage;
 }
 
+const canonicalStores = new WeakMap<
+  EventStoreRepositories,
+  { database: Database; store: EventStore }
+>();
+const storeDatabases = new WeakMap<EventStore, Database>();
+
+export function assertCanonicalEventStore(database: Database, store: EventStore): void {
+  const storeDatabase = storeDatabases.get(store);
+  if (!storeDatabase) throw new Error("TASK_EVENT_STORE_NOT_CANONICAL");
+  if (storeDatabase !== database) throw new Error("TASK_EVENT_STORE_DATABASE_MISMATCH");
+}
+
 export function createEventStore(database: Database, repositories: EventStoreRepositories): EventStore {
+  const canonical = canonicalStores.get(repositories);
+  if (canonical) {
+    if (canonical.database !== database) throw new Error("EVENT_STORE_DATABASE_MISMATCH");
+    return canonical.store;
+  }
   const store: EventStore = {
     append(input) {
       return database.transaction(() => {
@@ -86,6 +103,7 @@ export function createEventStore(database: Database, repositories: EventStoreRep
       return RoomEventPageSchema.parse({ roomId: cursor.roomId, events, nextRoomSeq, hasMore });
     }
   };
-  bindRepositoryEventStore(repositories, store);
+  storeDatabases.set(store, database);
+  canonicalStores.set(repositories, { database, store });
   return store;
 }

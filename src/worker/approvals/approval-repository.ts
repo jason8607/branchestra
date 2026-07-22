@@ -71,6 +71,31 @@ function mapApproval(row: ApprovalRow): ApprovalReceipt {
   } as ApprovalReceipt;
 }
 
+function assertRestartSurvival(receipt: ApprovalReceipt): void {
+  if (receipt.kind !== "task_scope" && receipt.survivesWorkerRestart) {
+    throw new Error(`APPROVAL_RESTART_SURVIVAL_INVALID:${receipt.kind}`);
+  }
+}
+
+function assertReceiptMatchesRequest(
+  request: ApprovalRequest,
+  receipt: ApprovalReceipt
+): void {
+  if (
+    receipt.requestId !== request.id
+    || receipt.taskId !== request.taskId
+    || receipt.kind !== request.kind
+    || receipt.scopeHash !== request.scopeHash
+    || canonicalJson(receipt.scope) !== canonicalJson(request.scope)
+  ) {
+    throw new Error(`APPROVAL_RECEIPT_MISMATCH:${request.id}`);
+  }
+  if (receipt.workerGeneration !== request.requestedGeneration) {
+    throw new Error(`APPROVAL_GENERATION_MISMATCH:${request.id}`);
+  }
+  assertRestartSurvival(receipt);
+}
+
 export class ApprovalRepository {
   constructor(private readonly db: Database) {}
 
@@ -106,15 +131,7 @@ export class ApprovalRepository {
       if (!request || request.status !== "pending") {
         throw new Error(`APPROVAL_REQUEST_NOT_PENDING:${requestId}`);
       }
-      if (
-        receipt.requestId !== request.id
-        || receipt.taskId !== request.taskId
-        || receipt.kind !== request.kind
-        || receipt.scopeHash !== request.scopeHash
-        || canonicalJson(receipt.scope) !== canonicalJson(request.scope)
-      ) {
-        throw new Error(`APPROVAL_RECEIPT_MISMATCH:${requestId}`);
-      }
+      assertReceiptMatchesRequest(request, receipt);
       const decided = this.db.prepare("UPDATE approval_requests SET status = 'decided' WHERE id = ? AND status = 'pending'")
         .run(requestId);
       if (decided.changes !== 1) throw new Error(`APPROVAL_REQUEST_NOT_PENDING:${requestId}`);
@@ -123,6 +140,9 @@ export class ApprovalRepository {
   }
 
   insert(receipt: ApprovalReceipt): void {
+    const request = this.getRequest(receipt.requestId);
+    if (!request) throw new Error(`APPROVAL_REQUEST_NOT_FOUND:${receipt.requestId}`);
+    assertReceiptMatchesRequest(request, receipt);
     this.db.prepare(`INSERT INTO approvals(${APPROVAL_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(
         receipt.id,

@@ -17,6 +17,14 @@ export interface OperationRecord<E = Record<string, unknown>, O = Record<string,
   updatedAt: string;
 }
 
+export type OperationIntentRecord<E = Record<string, unknown>> = Omit<
+  OperationRecord<E, never>,
+  "status" | "observation"
+> & {
+  status: "intent";
+  observation: null;
+};
+
 export interface RecordIntentResult<E> {
   record: OperationRecord<E, never>;
   created: boolean;
@@ -82,7 +90,13 @@ function mapOperation<E = Record<string, unknown>, O = Record<string, unknown>>(
 export class OperationJournal {
   constructor(private readonly db: Database) {}
 
-  recordIntent<E>(record: OperationRecord<E, never>): RecordIntentResult<E> {
+  recordIntent<E>(record: OperationIntentRecord<E>): RecordIntentResult<E> {
+    if ((record as OperationRecord<E, unknown>).status !== "intent") {
+      throw new Error("OPERATION_INTENT_STATUS_REQUIRED");
+    }
+    if ((record as OperationRecord<E, unknown>).observation !== null) {
+      throw new Error("OPERATION_INTENT_OBSERVATION_MUST_BE_NULL");
+    }
     const expectedJson = canonicalJson(record.expected);
     const existingRow = this.db.prepare(`SELECT ${OPERATION_COLUMNS} FROM operation_journal WHERE idempotency_key = ?`)
       .get(record.idempotencyKey) as OperationRow | undefined;
@@ -101,14 +115,19 @@ export class OperationJournal {
         record.operationType,
         record.idempotencyKey,
         expectedJson,
-        record.status,
+        "intent",
         null,
         record.workerGeneration,
         record.createdAt,
         record.updatedAt
       );
     return {
-      record: { ...record, expected: JSON.parse(expectedJson) as E, observation: null },
+      record: {
+        ...record,
+        expected: JSON.parse(expectedJson) as E,
+        status: "intent",
+        observation: null
+      },
       created: true
     };
   }

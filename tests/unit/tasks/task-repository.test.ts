@@ -1,9 +1,13 @@
 import { rmSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import { openTestDatabase } from "../../fixtures/test-database";
+import type { EventStore } from "../../../src/worker/storage/event-store";
+import { TaskRepository } from "../../../src/worker/tasks/task-repository";
 import { transitionTask } from "../../../src/worker/tasks/task-state-machine";
 import { createEventStore } from "../../../src/worker/storage/event-store";
-import { createRepositories } from "../../../src/worker/storage/repositories";
+import * as repositoryModule from "../../../src/worker/storage/repositories";
+
+const { createRepositories } = repositoryModule;
 
 describe("TaskRepository", () => {
   const fixtures: ReturnType<typeof openTestDatabase>[] = [];
@@ -75,6 +79,103 @@ describe("TaskRepository", () => {
         payload: transition.event.payload,
         createdAt: transition.next.updatedAt
       }]);
+  });
+
+  it("constructs the canonical task EventStore before the compatibility lookup", () => {
+    const current = openTestDatabase();
+    fixtures.push(current);
+    const repositories = createRepositories(current.db);
+    repositories.tasks.insert(current.records.task);
+    const transition = transitionTask(current.records.task, {
+      type: "approveScope",
+      receiptId: current.records.scopeApproval.id,
+      collaborationRoundBudget: 2
+    });
+
+    repositories.tasks.applyTransition(
+      transition,
+      "40000000-0000-4000-8000-000000000010"
+    );
+
+    expect(current.db.prepare("SELECT event_type, actor FROM room_events").all())
+      .toEqual([{ event_type: "task.transitioned", actor: "system" }]);
+  });
+
+  it("cannot replace the factory EventStore with an arbitrary structural store", () => {
+    const current = openTestDatabase();
+    fixtures.push(current);
+    const repositories = createRepositories(current.db);
+    repositories.tasks.insert(current.records.task);
+    let fakeAppendCalls = 0;
+    const fakeStore = {
+      append() {
+        fakeAppendCalls += 1;
+        return {} as never;
+      },
+      snapshot() {
+        return {} as never;
+      },
+      after() {
+        return {} as never;
+      }
+    };
+    const legacyBinder = (repositoryModule as Record<string, unknown>)["bindRepositoryEventStore"];
+    if (typeof legacyBinder === "function") {
+      (legacyBinder as (repositories: unknown, events: unknown) => void)(repositories, fakeStore);
+    }
+    const transition = transitionTask(current.records.task, {
+      type: "approveScope",
+      receiptId: current.records.scopeApproval.id,
+      collaborationRoundBudget: 2
+    });
+
+    repositories.tasks.applyTransition(
+      transition,
+      "40000000-0000-4000-8000-000000000011"
+    );
+
+    expect(legacyBinder).toBeUndefined();
+    expect(fakeAppendCalls).toBe(0);
+    expect(current.db.prepare("SELECT count(*) AS count FROM room_events").get())
+      .toEqual({ count: 1 });
+  });
+
+  it("rejects direct TaskRepository construction with a fake EventStore", () => {
+    const current = openTestDatabase();
+    fixtures.push(current);
+    const fakeStore = {
+      append() {
+        return {} as never;
+      },
+      snapshot() {
+        return {} as never;
+      },
+      after() {
+        return {} as never;
+      }
+    } as EventStore;
+
+    expect(() => new TaskRepository(current.db, fakeStore))
+      .toThrow("TASK_EVENT_STORE_NOT_CANONICAL");
+  });
+
+  it("returns one canonical EventStore for duplicate compatibility lookups", () => {
+    const current = openTestDatabase();
+    fixtures.push(current);
+    const repositories = createRepositories(current.db);
+    const first = createEventStore(current.db, repositories);
+
+    expect(createEventStore(current.db, repositories)).toBe(first);
+  });
+
+  it("rejects EventStore lookup with a different Database identity", () => {
+    const first = openTestDatabase();
+    const second = openTestDatabase();
+    fixtures.push(first, second);
+    const repositories = createRepositories(first.db);
+
+    expect(() => createEventStore(second.db, repositories))
+      .toThrow("EVENT_STORE_DATABASE_MISMATCH");
   });
 
   it("rolls back a task update when canonical event append fails", () => {

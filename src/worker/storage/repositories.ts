@@ -4,7 +4,7 @@ import { ApprovalRepository } from "../approvals/approval-repository";
 import { OperationJournal } from "../operations/operation-journal";
 import { TaskRepository } from "../tasks/task-repository";
 import type { Database } from "./database";
-import type { EventStore } from "./event-store";
+import { createEventStore } from "./event-store";
 
 export interface ProjectRepository {
   insert(project: Project): Project;
@@ -28,17 +28,6 @@ export interface DomainRepositories extends EventStoreRepositories {
   tasks: TaskRepository;
   approvals: ApprovalRepository;
   operations: OperationJournal;
-}
-
-const eventStoreBindings = new WeakMap<EventStoreRepositories, (events: EventStore) => void>();
-
-// M1 constructs repositories before its canonical EventStore. Keep that order while giving
-// TaskRepository a non-optional EventStore dependency and never introducing another append path.
-export function bindRepositoryEventStore(
-  repositories: EventStoreRepositories,
-  events: EventStore
-): void {
-  eventStoreBindings.get(repositories)?.(events);
 }
 
 interface ProjectRow {
@@ -81,63 +70,42 @@ export function createRepositories(database: Database): DomainRepositories {
   const insertProject = database.prepare("INSERT INTO projects(id, repository_root, git_common_dir, display_name, head_oid, default_branch, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)");
   const insertRoom = database.prepare("INSERT INTO rooms(id, project_id, title, created_at) VALUES (?, ?, ?, ?)");
 
-  let canonicalEventStore: EventStore | undefined;
-  const forwardedEventStore: EventStore = {
-    append(input) {
-      if (!canonicalEventStore) throw new Error("TASK_EVENT_STORE_NOT_BOUND");
-      return canonicalEventStore.append(input);
+  const projects: ProjectRepository = {
+    insert(input) {
+      const project = ProjectSchema.parse(input);
+      insertProject.run(project.id, project.repositoryRoot, project.gitCommonDir, project.displayName, project.headOid, project.defaultBranch, project.createdAt);
+      return project;
     },
-    snapshot() {
-      if (!canonicalEventStore) throw new Error("TASK_EVENT_STORE_NOT_BOUND");
-      return canonicalEventStore.snapshot();
+    findByRepositoryRoot(repositoryRoot) {
+      const row = database.prepare(`SELECT ${projectColumns} FROM projects WHERE repository_root = ?`).get(repositoryRoot) as ProjectRow | undefined;
+      return row ? mapProject(row) : undefined;
     },
-    after(cursor) {
-      if (!canonicalEventStore) throw new Error("TASK_EVENT_STORE_NOT_BOUND");
-      return canonicalEventStore.after(cursor);
+    findById(id) {
+      const row = database.prepare(`SELECT ${projectColumns} FROM projects WHERE id = ?`).get(id) as ProjectRow | undefined;
+      return row ? mapProject(row) : undefined;
+    },
+    list() {
+      return (database.prepare(`SELECT ${projectColumns} FROM projects ORDER BY created_at, id`).all() as unknown as ProjectRow[]).map(mapProject);
     }
   };
-  const repositories: DomainRepositories = {
-    projects: {
-      insert(input) {
-        const project = ProjectSchema.parse(input);
-        insertProject.run(project.id, project.repositoryRoot, project.gitCommonDir, project.displayName, project.headOid, project.defaultBranch, project.createdAt);
-        return project;
-      },
-      findByRepositoryRoot(repositoryRoot) {
-        const row = database.prepare(`SELECT ${projectColumns} FROM projects WHERE repository_root = ?`).get(repositoryRoot) as ProjectRow | undefined;
-        return row ? mapProject(row) : undefined;
-      },
-      findById(id) {
-        const row = database.prepare(`SELECT ${projectColumns} FROM projects WHERE id = ?`).get(id) as ProjectRow | undefined;
-        return row ? mapProject(row) : undefined;
-      },
-      list() {
-        return (database.prepare(`SELECT ${projectColumns} FROM projects ORDER BY created_at, id`).all() as unknown as ProjectRow[]).map(mapProject);
-      }
+  const rooms: RoomRepository = {
+    insert(input) {
+      const room = RoomSchema.parse(input);
+      insertRoom.run(room.id, room.projectId, room.title, room.createdAt);
+      return room;
     },
-    rooms: {
-      insert(input) {
-        const room = RoomSchema.parse(input);
-        insertRoom.run(room.id, room.projectId, room.title, room.createdAt);
-        return room;
-      },
-      findById(id) {
-        const row = database.prepare(`SELECT ${roomColumns} FROM rooms WHERE id = ?`).get(id) as RoomRow | undefined;
-        return row ? mapRoom(row) : undefined;
-      },
-      list() {
-        return (database.prepare(`SELECT ${roomColumns} FROM rooms ORDER BY created_at, id`).all() as unknown as RoomRow[]).map(mapRoom);
-      }
+    findById(id) {
+      const row = database.prepare(`SELECT ${roomColumns} FROM rooms WHERE id = ?`).get(id) as RoomRow | undefined;
+      return row ? mapRoom(row) : undefined;
     },
-    tasks: new TaskRepository(database, forwardedEventStore),
-    approvals: new ApprovalRepository(database),
-    operations: new OperationJournal(database)
-  };
-  eventStoreBindings.set(repositories, (events) => {
-    if (canonicalEventStore && canonicalEventStore !== events) {
-      throw new Error("TASK_EVENT_STORE_ALREADY_BOUND");
+    list() {
+      return (database.prepare(`SELECT ${roomColumns} FROM rooms ORDER BY created_at, id`).all() as unknown as RoomRow[]).map(mapRoom);
     }
-    canonicalEventStore = events;
-  });
+  };
+  const repositories = { projects, rooms } as DomainRepositories;
+  const canonicalEventStore = createEventStore(database, repositories);
+  repositories.tasks = new TaskRepository(database, canonicalEventStore);
+  repositories.approvals = new ApprovalRepository(database);
+  repositories.operations = new OperationJournal(database);
   return repositories;
 }

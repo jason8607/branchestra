@@ -4,7 +4,7 @@ import type {
   TaskTransition
 } from "../../shared/contracts/domain";
 import type { Database } from "../storage/database";
-import type { EventStore } from "../storage/event-store";
+import { assertCanonicalEventStore, type EventStore } from "../storage/event-store";
 
 interface TaskRow {
   id: string;
@@ -100,10 +100,17 @@ function mapRun(row: AgentRunRow): AgentRunRecord {
 }
 
 export class TaskRepository {
+  private readonly db: Database;
+  private readonly events: EventStore;
+
   constructor(
-    private readonly db: Database,
-    private readonly events: EventStore
-  ) {}
+    db: Database,
+    events: EventStore
+  ) {
+    assertCanonicalEventStore(db, events);
+    this.db = db;
+    this.events = events;
+  }
 
   insert(task: TaskRecord): void {
     this.db.prepare(`INSERT INTO tasks(${TASK_COLUMNS}) VALUES (${TASK_COLUMNS.split(", ").map(() => "?").join(", ")})`)

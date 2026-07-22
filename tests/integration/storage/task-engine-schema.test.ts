@@ -1,6 +1,7 @@
 import { rmSync } from "node:fs";
 import { dirname } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import type { ApprovalReceipt, ApprovalRequest } from "../../../src/shared/contracts/domain";
 import { openTestDatabase } from "../../fixtures/test-database";
 import { runMigrations } from "../../../src/worker/storage/migrations";
 import { createRepositories } from "../../../src/worker/storage/repositories";
@@ -157,6 +158,116 @@ describe("task engine schema", () => {
       id: "approval-mismatch",
       scopeHash: "sha256:different"
     })).toThrow(`APPROVAL_RECEIPT_MISMATCH:${current.records.scopeApprovalRequest.id}`);
+  });
+
+  it("rejects a receipt from a different worker generation atomically", () => {
+    const current = fixture();
+    const repositories = createRepositories(current.db);
+    repositories.tasks.insert(current.records.task);
+    repositories.approvals.insertRequest(current.records.sensitiveApprovalRequest);
+
+    expect(() => repositories.approvals.decideRequest(
+      current.records.sensitiveApprovalRequest.id,
+      { ...current.records.sensitiveApproval, workerGeneration: "generation-2" }
+    )).toThrow(`APPROVAL_GENERATION_MISMATCH:${current.records.sensitiveApprovalRequest.id}`);
+    expect(repositories.approvals.getRequest(current.records.sensitiveApprovalRequest.id)?.status)
+      .toBe("pending");
+    expect(repositories.approvals.get(current.records.sensitiveApproval.id)).toBeNull();
+  });
+
+  it.each([
+    ["additional_round", { additionalRounds: 1 }, "sha256:additional"],
+    ["external_operation", { operation: "git.push" }, "sha256:external"],
+    ["final_merge", {
+      targetRef: "refs/heads/main",
+      baseOid: "a".repeat(40),
+      candidateOid: "b".repeat(40),
+      diffHash: "sha256:diff",
+      testSetHash: "sha256:tests"
+    }, "sha256:merge"]
+  ] as const)("rejects restart-safe %s receipts before changing request status", (kind, scope, scopeHash) => {
+    const current = fixture();
+    const repositories = createRepositories(current.db);
+    repositories.tasks.insert(current.records.task);
+    const request = {
+      id: `${kind}-request`,
+      taskId: current.records.task.id,
+      kind,
+      scope,
+      scopeHash,
+      requestedGeneration: "generation-1",
+      status: "pending",
+      requestedAt: current.records.task.createdAt
+    } as ApprovalRequest;
+    const receipt = {
+      id: `${kind}-approval`,
+      requestId: request.id,
+      taskId: request.taskId,
+      kind,
+      scope,
+      decision: "approved",
+      scopeHash,
+      workerGeneration: "generation-1",
+      survivesWorkerRestart: true,
+      decidedAt: current.records.task.updatedAt
+    } as ApprovalReceipt;
+    repositories.approvals.insertRequest(request);
+
+    expect(() => repositories.approvals.decideRequest(request.id, receipt))
+      .toThrow(`APPROVAL_RESTART_SURVIVAL_INVALID:${kind}`);
+    expect(repositories.approvals.getRequest(request.id)?.status).toBe("pending");
+    expect(repositories.approvals.get(receipt.id)).toBeNull();
+  });
+
+  it("persists non-surviving sensitive approval and invalidates it after generation change", () => {
+    const current = fixture();
+    const repositories = createRepositories(current.db);
+    repositories.tasks.insert(current.records.task);
+    repositories.approvals.insertRequest(current.records.sensitiveApprovalRequest);
+    repositories.approvals.decideRequest(
+      current.records.sensitiveApprovalRequest.id,
+      current.records.sensitiveApproval
+    );
+
+    expect(repositories.approvals.getRequired(current.records.sensitiveApproval.id)
+      .survivesWorkerRestart).toBe(false);
+    expect(repositories.approvals.invalidateSensitiveFromOlderGeneration("generation-2"))
+      .toEqual([current.records.sensitiveApproval.id]);
+    expect(repositories.approvals.get(current.records.sensitiveApproval.id)).toBeNull();
+  });
+
+  it("rejects every non-intent initial operation status before SQL", () => {
+    const current = fixture();
+    const repositories = createRepositories(current.db);
+    repositories.tasks.insert(current.records.task);
+
+    for (const status of ["executing", "observed", "completed", "needs_attention"] as const) {
+      const invalid = {
+        ...current.records.operationIntent,
+        id: `operation-${status}`,
+        idempotencyKey: `operation-key-${status}`,
+        status
+      } as unknown as typeof current.records.operationIntent;
+      expect(() => repositories.operations.recordIntent(invalid))
+        .toThrow("OPERATION_INTENT_STATUS_REQUIRED");
+    }
+    expect(current.db.prepare("SELECT count(*) AS count FROM operation_journal").get())
+      .toEqual({ count: 0 });
+  });
+
+  it("rejects a non-null initial operation observation before SQL", () => {
+    const current = fixture();
+    const repositories = createRepositories(current.db);
+    repositories.tasks.insert(current.records.task);
+    const invalid = {
+      ...current.records.operationIntent,
+      observation: { oid: "b".repeat(40) }
+    } as unknown as typeof current.records.operationIntent;
+
+    expect(() => repositories.operations.recordIntent(invalid))
+      .toThrow("OPERATION_INTENT_OBSERVATION_MUST_BE_NULL");
+    expect(current.db.prepare("SELECT count(*) AS count FROM operation_journal").get())
+      .toEqual({ count: 0 });
   });
 
   it("canonicalizes operation intent and enforces idempotency and status preconditions", () => {

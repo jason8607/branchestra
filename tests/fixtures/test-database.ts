@@ -13,7 +13,7 @@ import type {
   TestResultRecord,
   WorktreeRecord
 } from "../../src/shared/contracts/domain";
-import type { OperationRecord } from "../../src/worker/operations/operation-journal";
+import type { OperationIntentRecord } from "../../src/worker/operations/operation-journal";
 import { openDatabase, type Database } from "../../src/worker/storage/database";
 import { runMigrations } from "../../src/worker/storage/migrations";
 
@@ -27,7 +27,7 @@ export interface TestDatabaseRecords {
   scopeApproval: Extract<ApprovalReceipt, { kind: "task_scope" }>;
   sensitiveApprovalRequest: Extract<ApprovalRequest, { kind: "external_operation" }>;
   sensitiveApproval: Extract<ApprovalReceipt, { kind: "external_operation" }>;
-  operationIntent: OperationRecord<{ nested: { alpha: number; beta: number }; ref: string }, never>;
+  operationIntent: OperationIntentRecord<{ nested: { alpha: number; beta: number }; ref: string }>;
   run: AgentRunRecord;
   worktree: WorktreeRecord;
   checkpoint: CheckpointRecord;
