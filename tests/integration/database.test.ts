@@ -151,22 +151,41 @@ describe("worker database", () => {
     database.close();
   });
 
-  it("restores outer transaction semantics after commit fails", () => {
+  it("remains usable when commit fails and rollback cleanup succeeds", () => {
     const database = openDatabase(":memory:");
-    database.exec("CREATE TABLE values_under_test (value TEXT NOT NULL)");
+    database.exec(`
+      CREATE TABLE parents (id INTEGER PRIMARY KEY);
+      CREATE TABLE children (
+        parent_id INTEGER NOT NULL REFERENCES parents(id) DEFERRABLE INITIALLY DEFERRED
+      );
+    `);
+
+    expect(() => database.transaction(() => {
+      database.prepare("INSERT INTO children(parent_id) VALUES (?)").run(1);
+    })).toThrow(/foreign key/i);
+
+    database.transaction(() => {
+      database.prepare("INSERT INTO parents(id) VALUES (?)").run(1);
+    });
+    expect(database.prepare("SELECT id FROM parents").all()).toEqual([{ id: 1 }]);
+    database.close();
+  });
+
+  it("poisons the database when commit finalization and rollback cleanup both fail", () => {
+    const database = openDatabase(":memory:");
 
     expect(() => database.transaction(() => {
       database.exec("ROLLBACK");
     })).toThrow(/cannot commit/i);
 
-    database.transaction(() => {
-      database.prepare("INSERT INTO values_under_test(value) VALUES (?)").run("recovered");
-    });
-    expect(database.prepare("SELECT value FROM values_under_test").all()).toEqual([{ value: "recovered" }]);
-    database.close();
+    expect(() => database.exec("SELECT 1")).toThrow(/unusable/i);
+    expect(() => database.prepare("SELECT 1")).toThrow(/unusable/i);
+    expect(() => database.transaction(() => undefined)).toThrow(/unusable/i);
+    expect(() => database.close()).not.toThrow();
+    expect(() => database.close()).not.toThrow();
   });
 
-  it("poisons the database when transaction cleanup cannot restore its state", () => {
+  it("poisons the database when thrown work prevents cleanup from restoring its state", () => {
     const database = openDatabase(":memory:");
     const originalError = new Error("abort after manual rollback");
 

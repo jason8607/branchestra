@@ -35,18 +35,16 @@ class SqliteDatabase implements Database {
     const savepoint = `branchestra_${depth}`;
     this.#raw.exec(depth === 0 ? "BEGIN IMMEDIATE" : `SAVEPOINT ${savepoint}`);
     this.#transactionDepth += 1;
-    let workCompleted = false;
     try {
       const value = work();
       if (value instanceof Promise) throw new TypeError("Database transactions must be synchronous");
-      workCompleted = true;
       this.#raw.exec(depth === 0 ? "COMMIT" : `RELEASE SAVEPOINT ${savepoint}`);
       return value;
     } catch (error) {
       try {
         this.#raw.exec(depth === 0 ? "ROLLBACK" : `ROLLBACK TO SAVEPOINT ${savepoint}; RELEASE SAVEPOINT ${savepoint}`);
       } catch {
-        if (!workCompleted) this.#poison();
+        this.#poison();
       }
       throw error;
     } finally {
