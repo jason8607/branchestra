@@ -86,6 +86,7 @@
 - Create: `src/main/index.ts`
 - Create: `src/preload/index.ts`
 - Create: `src/renderer/index.html`
+- Create: `src/renderer/vite-env.d.ts`
 - Create: `src/renderer/main.tsx`
 - Create: `src/renderer/App.tsx`
 - Create: `src/renderer/styles.css`
@@ -206,6 +207,13 @@ Use this shared `tsconfig.json` body and extend it from the two environment conf
 ```
 
 `tsconfig.node.json` adds `types: ["node", "electron"]` and includes configuration files plus `src/main/**/*.ts`, `src/preload/**/*.ts`, `src/worker/**/*.ts`, `src/shared/**/*.ts`, `tests/**/*.ts`, and `e2e/**/*.ts`. `tsconfig.renderer.json` adds `jsx: "react-jsx"`, `lib: ["ES2024", "DOM", "DOM.Iterable"]`, and includes `src/renderer/**/*`, `src/shared/**/*`, and `tests/**/*.tsx`.
+
+Create the standard Vite asset declaration so strict TypeScript accepts the Renderer CSS side-effect import without `skipLibCheck` or a handwritten wildcard declaration:
+
+```ts
+// src/renderer/vite-env.d.ts
+/// <reference types="vite/client" />
+```
 
 Create the build and test configs:
 
@@ -388,7 +396,7 @@ Expected: electron-vite builds Main, Preload, and Renderer into `out/` with no e
 - [ ] **Step 6: Commit**
 
 ```bash
-git add .nvmrc .gitignore package.json pnpm-lock.yaml pnpm-workspace.yaml electron.vite.config.ts eslint.config.mjs tsconfig.json tsconfig.node.json tsconfig.renderer.json vitest.config.ts playwright.config.ts src/main/window-options.ts src/main/index.ts src/preload/index.ts src/renderer/index.html src/renderer/main.tsx src/renderer/App.tsx src/renderer/styles.css tests/unit/window-options.test.ts
+git add .nvmrc .gitignore package.json pnpm-lock.yaml pnpm-workspace.yaml electron.vite.config.ts eslint.config.mjs tsconfig.json tsconfig.node.json tsconfig.renderer.json vitest.config.ts playwright.config.ts src/main/window-options.ts src/main/index.ts src/preload/index.ts src/renderer/index.html src/renderer/vite-env.d.ts src/renderer/main.tsx src/renderer/App.tsx src/renderer/styles.css tests/unit/window-options.test.ts
 git commit -m "feat: scaffold secure Electron shell"
 ```
 
