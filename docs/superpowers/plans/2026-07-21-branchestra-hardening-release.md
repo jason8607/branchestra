@@ -6,7 +6,7 @@
 
 **Architecture:** This milestone tightens the existing Renderer -> Preload -> Main -> Worker trust boundaries without adding a second state owner. Security decisions remain structured worker events, release policy is machine-checked before packaging, and each macOS architecture is built and smoke-tested on matching GitHub-hosted hardware before release assets and the Homebrew Cask are published.
 
-**Tech Stack:** Electron 43.1.1, electron-vite 5.0.0, electron-builder 26.15.3, `@electron/asar` 4.2.0, React 19.2.7, TypeScript 7.0.2, Zod 4.4.3, react-markdown 10.1.0, rehype-sanitize 6.0.0, Testing Library React 16.3.2/DOM 10.4.1, jsdom 29.1.1, Vitest 4.1.10, Playwright 1.61.1, Node.js 24.18.0, pnpm 11.15.1, GitHub Actions, Homebrew Cask
+**Tech Stack:** Electron 43.1.1, electron-vite 5.0.0, electron-builder 26.15.3, `@electron/asar` 4.2.0, React 19.2.7, TypeScript 6.0.3, Zod 4.4.3, react-markdown 10.1.0, rehype-sanitize 6.0.0, Testing Library React 16.3.2/DOM 10.4.1, jsdom 29.1.1, Vitest 4.1.10, Playwright 1.61.1, Node.js 24.18.0, pnpm 11.15.1, GitHub Actions, Homebrew Cask
 
 ## Global Constraints
 

@@ -40,10 +40,10 @@ Every implementation plan uses exact versions. Upgrade them only in a dedicated 
 | electron-vite | `5.0.0` | Main, preload, Renderer, utility-worker, and Provider-runner entries. |
 | electron-builder | `26.15.3` | Per-architecture DMG/ZIP, signing, and notarization. |
 | `@electron/asar` | `4.2.0` | Release-time inspection of packaged ASAR contents. |
-| TypeScript | `7.0.2` | Strict type checking. |
+| TypeScript | `6.0.3` | Strict type checking; latest line supported by the pinned typescript-eslint release. |
 | React / React DOM | `19.2.7` | Renderer. |
-| Vite | `8.1.5` | Renderer/build pipeline underneath electron-vite. |
-| `@vitejs/plugin-react` | `6.0.3` | React compilation. |
+| Vite | `7.3.6` | Renderer/build pipeline within electron-vite 5's supported peer range. |
+| `@vitejs/plugin-react` | `5.2.0` | React compilation compatible with Vite 7. |
 | Zod | `4.4.3` | Versioned trust-boundary schemas. |
 | Vitest | `4.1.10` | Unit, contract, and integration tests. |
 | Playwright Test | `1.61.1` | Electron and packaged-app journeys. |
