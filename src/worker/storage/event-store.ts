@@ -37,18 +37,24 @@ export function createEventStore(database: Database, repositories: DomainReposit
         }
         const row = database.prepare("SELECT COALESCE(MAX(room_seq), 0) + 1 AS next_seq FROM room_events WHERE room_id = ?").get(input.roomId) as { next_seq: number };
         const event = RoomEventSchema.parse({ ...input, roomSeq: row.next_seq });
+        if (event.payload.roomId !== event.roomId) {
+          throw new Error(`Event payload roomId does not match event roomId: ${event.id}`);
+        }
         database.prepare("INSERT INTO room_events(id, room_id, room_seq, event_type, actor, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").run(event.id, event.roomId, event.roomSeq, event.type, event.actor, JSON.stringify(event.payload), event.createdAt);
         return event;
       });
     },
     snapshot() {
-      const cursorRows = database.prepare("SELECT room_id, MAX(room_seq) AS room_seq FROM room_events GROUP BY room_id").all() as Array<{ room_id: string; room_seq: number }>;
-      const roomCursors: Record<string, number> = Object.fromEntries(repositories.rooms.list().map((room) => [room.id, 0]));
-      for (const row of cursorRows) roomCursors[row.room_id] = row.room_seq;
-      return AppSnapshotSchema.parse({
-        projects: repositories.projects.list(),
-        rooms: repositories.rooms.list(),
-        roomCursors
+      return database.transaction(() => {
+        const cursorRows = database.prepare("SELECT room_id, MAX(room_seq) AS room_seq FROM room_events GROUP BY room_id").all() as Array<{ room_id: string; room_seq: number }>;
+        const rooms = repositories.rooms.list();
+        const roomCursors: Record<string, number> = Object.fromEntries(rooms.map((room) => [room.id, 0]));
+        for (const row of cursorRows) roomCursors[row.room_id] = row.room_seq;
+        return AppSnapshotSchema.parse({
+          projects: repositories.projects.list(),
+          rooms,
+          roomCursors
+        });
       });
     },
     after(cursor) {
