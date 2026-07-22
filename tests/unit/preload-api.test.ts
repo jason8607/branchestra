@@ -78,6 +78,20 @@ function fakePreloadTransport() {
 }
 
 describe("preload API", () => {
+  it("uses the injected sandbox UUID source for request correlation", () => {
+    const fixture = fakePreloadTransport();
+    const requestId = "10000000-0000-4000-8000-000000000099";
+    const api = createPreloadApi(fixture.transport, () => requestId);
+
+    void api.request({
+      type: "state.getSnapshot",
+      payload: {},
+      idempotencyKey: "snapshot-1"
+    });
+
+    expect(fixture.invocations[0]!.value.requestId).toBe(requestId);
+  });
+
   it("exposes only frozen request and subscribe methods and learns generation from responses", async () => {
     const fixture = fakePreloadTransport();
     const api = createPreloadApi(fixture.transport);
@@ -143,6 +157,95 @@ describe("preload API", () => {
     });
 
     expect(fixture.invocations[2]!.value.workerGeneration).toBe(generation);
+  });
+
+  it.each([
+    ["requestId", (request: RendererRequestEnvelope) => ({
+      ...snapshotResponse(request),
+      requestId: "10000000-0000-4000-8000-000000000099"
+    })],
+    ["idempotencyKey", (request: RendererRequestEnvelope) => ({
+      ...snapshotResponse(request),
+      idempotencyKey: "wrong-key"
+    })],
+    ["requestType", (request: RendererRequestEnvelope) => ({
+      ...snapshotResponse(request),
+      payload: { ...snapshotResponse(request).payload, requestType: "room.create" }
+    })]
+  ] as const)("rejects an uncorrelated response with mismatched %s without learning generation", async (
+    _field,
+    responseFor
+  ) => {
+    const fixture = fakePreloadTransport();
+    const api = createPreloadApi(fixture.transport);
+    const request = api.request({
+      type: "state.getSnapshot",
+      payload: {},
+      idempotencyKey: "snapshot-1"
+    });
+    fixture.resolveNext(responseFor(fixture.invocations[0]!.value));
+
+    await expect(request).rejects.toThrow("Renderer response correlation mismatch");
+    void api.request({
+      type: "state.getSnapshot",
+      payload: {},
+      idempotencyKey: "snapshot-2"
+    });
+    expect(fixture.invocations[1]!.value.workerGeneration).toBe(ZERO_WORKER_GENERATION);
+  });
+
+  it("rejects a response generation that differs from its active request without learning it", async () => {
+    const fixture = fakePreloadTransport();
+    const api = createPreloadApi(fixture.transport);
+    const bootstrap = api.request({
+      type: "state.getSnapshot",
+      payload: {},
+      idempotencyKey: "snapshot-1"
+    });
+    fixture.resolveNext(snapshotResponse(fixture.invocations[0]!.value));
+    await bootstrap;
+
+    const stale = api.request({
+      type: "state.getSnapshot",
+      payload: {},
+      idempotencyKey: "snapshot-2"
+    });
+    fixture.resolveNext(snapshotResponse(fixture.invocations[1]!.value, nextGeneration));
+    await expect(stale).rejects.toThrow("Renderer response generation mismatch");
+    void api.request({
+      type: "project.pickExisting",
+      payload: {},
+      idempotencyKey: "pick-1"
+    });
+    expect(fixture.invocations[2]!.value.workerGeneration).toBe(generation);
+  });
+
+  it("does not let an obsolete in-flight response regress a newer event generation", async () => {
+    const fixture = fakePreloadTransport();
+    const api = createPreloadApi(fixture.transport);
+    api.subscribe(() => undefined);
+    const bootstrap = api.request({
+      type: "state.getSnapshot",
+      payload: {},
+      idempotencyKey: "snapshot-1"
+    });
+    fixture.resolveNext(snapshotResponse(fixture.invocations[0]!.value));
+    await bootstrap;
+
+    const obsolete = api.request({
+      type: "state.getSnapshot",
+      payload: {},
+      idempotencyKey: "snapshot-2"
+    });
+    fixture.emit(validEvent(nextGeneration));
+    fixture.resolveNext(snapshotResponse(fixture.invocations[1]!.value, generation));
+    await expect(obsolete).rejects.toThrow("Renderer response generation is obsolete");
+    void api.request({
+      type: "project.pickExisting",
+      payload: {},
+      idempotencyKey: "pick-1"
+    });
+    expect(fixture.invocations[2]!.value.workerGeneration).toBe(nextGeneration);
   });
 
   it("validates subscribed events before learning generation or notifying listeners", async () => {

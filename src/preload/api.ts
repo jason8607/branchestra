@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import type { BranchestraApi } from "../shared/contracts/renderer-api";
 import {
   RendererRequestEnvelopeSchema,
@@ -12,21 +11,46 @@ export interface PreloadTransport {
   on(channel: "branchestra:event", listener: (value: unknown) => void): () => void;
 }
 
-export function createPreloadApi(transport: PreloadTransport): BranchestraApi {
+export type RequestIdGenerator = () => string;
+
+export function createPreloadApi(
+  transport: PreloadTransport,
+  nextRequestId: RequestIdGenerator = () => globalThis.crypto.randomUUID()
+): BranchestraApi {
   let generation = ZERO_WORKER_GENERATION;
   const api: BranchestraApi = {
     async request(command) {
+      const requestGeneration = generation;
       const envelope = RendererRequestEnvelopeSchema.parse({
         v: 1,
-        requestId: randomUUID(),
+        requestId: nextRequestId(),
         idempotencyKey: command.idempotencyKey,
-        workerGeneration: generation,
+        workerGeneration: requestGeneration,
         type: command.type,
         payload: command.payload
       });
       const response = WorkerResponseEnvelopeSchema.parse(
         await transport.invoke("branchestra:request", envelope)
       );
+      if (
+        response.requestId !== envelope.requestId
+        || response.idempotencyKey !== envelope.idempotencyKey
+        || response.payload.requestType !== envelope.type
+      ) {
+        throw new Error("Renderer response correlation mismatch");
+      }
+      const isBootstrapSnapshot = envelope.type === "state.getSnapshot"
+        && requestGeneration === ZERO_WORKER_GENERATION;
+      if (!isBootstrapSnapshot && response.workerGeneration !== requestGeneration) {
+        throw new Error("Renderer response generation mismatch");
+      }
+      if (
+        (isBootstrapSnapshot && generation !== ZERO_WORKER_GENERATION
+          && response.workerGeneration !== generation)
+        || (!isBootstrapSnapshot && generation !== requestGeneration)
+      ) {
+        throw new Error("Renderer response generation is obsolete");
+      }
       generation = response.workerGeneration;
       return response;
     },

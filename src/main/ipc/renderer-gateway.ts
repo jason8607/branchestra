@@ -47,6 +47,10 @@ export function registerRendererGateway(dependencies: RendererGatewayDependencie
     switch (request.type) {
       case "project.pickExisting": {
         const selectedPath = await dependencies.dialog.pickExistingProject(dependencies.parentWindow);
+        const generationAfterDialog = dependencies.supervisor.getGeneration();
+        if (generationAfterDialog === null || generationAfterDialog !== activeGeneration) {
+          throw new Error("Worker generation changed while project dialog was open");
+        }
         if (selectedPath === null) {
           return WorkerResponseEnvelopeSchema.parse({
             v: request.v,

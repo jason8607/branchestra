@@ -34,6 +34,12 @@ vi.mock("../../src/main/worker/utility-process-adapter", () => ({
 
 const generation = "50000000-0000-4000-8000-000000000001";
 
+function deferred<T>(): { promise: Promise<T>; resolve(value: T): void } {
+  let resolvePromise: (value: T) => void = () => undefined;
+  const promise = new Promise<T>((resolve) => { resolvePromise = resolve; });
+  return { promise, resolve: resolvePromise };
+}
+
 function workerResponse(request: WorkerRequestEnvelope): WorkerResponseEnvelope {
   const data = (() => {
     switch (request.type) {
@@ -112,6 +118,7 @@ function gatewayFixture(options: {
   selectedPath: string | null;
   senderId: number;
   activeGeneration?: string | null;
+  dialogResult?: Promise<string | null>;
   responseTransform?: (response: WorkerResponseEnvelope) => WorkerResponseEnvelope;
 }) {
   type Handler = (event: { sender: { id: number } }, raw: unknown) => Promise<unknown>;
@@ -120,8 +127,11 @@ function gatewayFixture(options: {
     handle: vi.fn((channel: string, handler: Handler) => handlers.set(channel, handler)),
     removeHandler: vi.fn((channel: string) => handlers.delete(channel))
   };
+  let activeGeneration: string | null = "activeGeneration" in options
+    ? options.activeGeneration!
+    : generation;
   const dialog = {
-    pickExistingProject: vi.fn(async () => options.selectedPath)
+    pickExistingProject: vi.fn(async () => options.dialogResult ?? options.selectedPath)
   };
   let eventListener: ((event: unknown) => void) | null = null;
   const unsubscribe = vi.fn();
@@ -134,9 +144,7 @@ function gatewayFixture(options: {
       eventListener = listener;
       return unsubscribe;
     }),
-    getGeneration: vi.fn(() => (
-      "activeGeneration" in options ? options.activeGeneration! : generation
-    ))
+    getGeneration: vi.fn(() => activeGeneration)
   };
   const trustedWebContents = { id: options.senderId, send: vi.fn() };
   const parentWindow = {} as BrowserWindow;
@@ -147,6 +155,9 @@ function gatewayFixture(options: {
     supervisor,
     trustedWebContents,
     unsubscribe,
+    setActiveGeneration(value: string | null): void {
+      activeGeneration = value;
+    },
     dependencies: { ipcMain, trustedWebContents, parentWindow, dialog, supervisor },
     async invoke(senderId: number, raw: unknown): Promise<unknown> {
       const handler = handlers.get("branchestra:request");
@@ -381,6 +392,36 @@ describe("renderer gateway", () => {
     });
     expect(fixture.supervisor.request).not.toHaveBeenCalled();
   });
+
+  it.each([
+    [null, "50000000-0000-4000-8000-000000000002"],
+    ["/selected/by/main", null]
+  ] as const)(
+    "rejects dialog result %s when the active generation changes while the dialog is open",
+    async (dialogResult, replacementGeneration) => {
+      const pendingDialog = deferred<string | null>();
+      const fixture = gatewayFixture({
+        selectedPath: null,
+        senderId: 42,
+        dialogResult: pendingDialog.promise
+      });
+      registerRendererGateway(fixture.dependencies);
+      const response = fixture.invoke(42, {
+        v: 1,
+        requestId: "10000000-0000-4000-8000-000000000001",
+        idempotencyKey: "pick-1",
+        workerGeneration: fixture.generation,
+        type: "project.pickExisting",
+        payload: {}
+      });
+      await Promise.resolve();
+      fixture.setActiveGeneration(replacementGeneration);
+      pendingDialog.resolve(dialogResult);
+
+      await expect(response).rejects.toThrow("Worker generation changed while project dialog was open");
+      expect(fixture.supervisor.request).not.toHaveBeenCalled();
+    }
+  );
 
   it("rejects an otherwise valid worker response that does not correlate to the request", async () => {
     const fixture = gatewayFixture({

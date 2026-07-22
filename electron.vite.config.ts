@@ -7,6 +7,14 @@ export default defineConfig({
     plugins: [externalizeDepsPlugin()],
     build: { rollupOptions: { input: { index: resolve("src/main/index.ts"), worker: resolve("src/worker/index.ts") } } }
   },
-  preload: { plugins: [externalizeDepsPlugin()] },
+  preload: {
+    build: {
+      externalizeDeps: false,
+      rollupOptions: {
+        external: ["electron"],
+        output: { format: "cjs", entryFileNames: "[name].js" }
+      }
+    }
+  },
   renderer: { root: resolve("src/renderer"), plugins: [react()] }
 });

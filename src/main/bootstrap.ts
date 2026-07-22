@@ -21,7 +21,7 @@ export function resolveBootstrapPaths(mainModuleUrl: string, userDataPath: strin
   return {
     workerEntry: join(mainDirectory, "worker.js"),
     dbPath: join(userDataPath, "branchestra.sqlite3"),
-    preloadEntry: join(mainDirectory, "../preload/index.mjs"),
+    preloadEntry: join(mainDirectory, "../preload/index.js"),
     rendererEntry: join(mainDirectory, "../renderer/index.html")
   };
 }

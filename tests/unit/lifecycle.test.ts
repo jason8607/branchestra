@@ -94,7 +94,7 @@ describe("application lifecycle", () => {
     expect(resolveBootstrapPaths("file:///app/out/main/bootstrap.js", "/data/user")).toEqual({
       workerEntry: "/app/out/main/worker.js",
       dbPath: "/data/user/branchestra.sqlite3",
-      preloadEntry: "/app/out/preload/index.mjs",
+      preloadEntry: "/app/out/preload/index.js",
       rendererEntry: "/app/out/renderer/index.html"
     });
   });
