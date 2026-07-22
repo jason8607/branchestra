@@ -12,34 +12,41 @@ export interface Database {
 class SqliteDatabase implements Database {
   readonly #raw: DatabaseSync;
   #transactionDepth = 0;
+  #closed = false;
+  #poisoned = false;
 
   constructor(raw: DatabaseSync) {
     this.#raw = raw;
   }
 
   exec(sql: string): void {
+    this.#assertUsable();
     this.#raw.exec(sql);
   }
 
   prepare(sql: string): StatementSync {
+    this.#assertUsable();
     return this.#raw.prepare(sql);
   }
 
   transaction<T>(work: () => T): T {
+    this.#assertUsable();
     const depth = this.#transactionDepth;
     const savepoint = `branchestra_${depth}`;
     this.#raw.exec(depth === 0 ? "BEGIN IMMEDIATE" : `SAVEPOINT ${savepoint}`);
     this.#transactionDepth += 1;
+    let workCompleted = false;
     try {
       const value = work();
       if (value instanceof Promise) throw new TypeError("Database transactions must be synchronous");
+      workCompleted = true;
       this.#raw.exec(depth === 0 ? "COMMIT" : `RELEASE SAVEPOINT ${savepoint}`);
       return value;
     } catch (error) {
       try {
         this.#raw.exec(depth === 0 ? "ROLLBACK" : `ROLLBACK TO SAVEPOINT ${savepoint}; RELEASE SAVEPOINT ${savepoint}`);
       } catch {
-        // Preserve the error from work or finalization when transaction cleanup is no longer possible.
+        if (!workCompleted) this.#poison();
       }
       throw error;
     } finally {
@@ -48,7 +55,23 @@ class SqliteDatabase implements Database {
   }
 
   close(): void {
+    if (this.#closed) return;
+    this.#closed = true;
     this.#raw.close();
+  }
+
+  #assertUsable(): void {
+    if (this.#poisoned) throw new Error("Database is unusable after transaction cleanup failed");
+    if (this.#closed) throw new Error("Database is closed");
+  }
+
+  #poison(): void {
+    this.#poisoned = true;
+    try {
+      this.close();
+    } catch {
+      // Preserve the original work or finalization error when closing a poisoned handle fails.
+    }
   }
 }
 

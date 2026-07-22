@@ -166,6 +166,22 @@ describe("worker database", () => {
     database.close();
   });
 
+  it("poisons the database when transaction cleanup cannot restore its state", () => {
+    const database = openDatabase(":memory:");
+    const originalError = new Error("abort after manual rollback");
+
+    expect(() => database.transaction(() => {
+      database.exec("ROLLBACK");
+      throw originalError;
+    })).toThrow(originalError);
+
+    expect(() => database.exec("SELECT 1")).toThrow(/unusable/i);
+    expect(() => database.prepare("SELECT 1")).toThrow(/unusable/i);
+    expect(() => database.transaction(() => undefined)).toThrow(/unusable/i);
+    expect(() => database.close()).not.toThrow();
+    expect(() => database.close()).not.toThrow();
+  });
+
   it("closes a raw handle when database configuration fails", () => {
     const originalExec = DatabaseSync.prototype.exec;
     const configurationError = new Error("configuration failed");
