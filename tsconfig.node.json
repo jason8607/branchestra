@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["node", "electron"]
+  },
+  "include": [
+    "*.config.ts",
+    "src/main/**/*.ts",
+    "src/preload/**/*.ts",
+    "src/worker/**/*.ts",
+    "src/shared/**/*.ts",
+    "tests/**/*.ts",
+    "e2e/**/*.ts"
+  ]
+}

@@ -12,3 +12,6 @@ release/
 *.log
 work/
 outputs/
+test-results/
+playwright-report/
+*.sqlite3*
