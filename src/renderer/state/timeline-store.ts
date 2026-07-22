@@ -62,9 +62,12 @@ export function createTimelineStore(
   const catches = new Map<string, { epoch: number; promise: Promise<void> }>();
   let disposed = false;
   let lifecycleEpoch = 0;
+  let statusSequence = 0;
+  let publishedStatusSequence = 0;
   let hydrateTask: { epoch: number; promise: Promise<void> } | null = null;
   let refreshTail: { epoch: number; promise: Promise<void> } | null = null;
   let workerGeneration: string | null = null;
+  let workerReady = false;
   let hasHydrated = false;
   let state: TimelineState = Object.freeze({
     connection: "bootstrapping",
@@ -99,28 +102,62 @@ export function createTimelineStore(
     if (isCurrent(epoch)) patchState(patch);
   }
 
+  function beginStatusOperation(): number {
+    statusSequence += 1;
+    return statusSequence;
+  }
+
+  function patchStatus(
+    epoch: number,
+    operation: number,
+    patch: Pick<TimelineState, "connection" | "error">
+  ): void {
+    if (!isCurrent(epoch) || operation < publishedStatusSequence) return;
+    publishedStatusSequence = operation;
+    patchState(patch);
+  }
+
   function currentSequence(roomId: string): number {
     return state.eventsByRoom[roomId]?.at(-1)?.roomSeq ?? 0;
   }
 
-  function acceptEvent(event: RoomEvent, epoch = lifecycleEpoch): void {
-    if (!isCurrent(epoch)) return;
-    const eventWithSameId = Object.values(state.eventsByRoom)
+  function planAcceptedEvents(
+    roomId: string,
+    candidates: readonly RoomEvent[]
+  ): { events: RoomEvent[]; cursor: number } {
+    const seenIds = new Set(Object.values(state.eventsByRoom)
       .flatMap((events) => events)
-      .find((candidate) => candidate.id === event.id);
-    if (eventWithSameId) return;
-    const current = currentSequence(event.roomId);
-    if (event.roomSeq <= current) return;
-    if (event.roomSeq !== current + 1) {
-      throw new Error(`Room event sequence gap after ${current}`);
+      .map((event) => event.id));
+    const events: RoomEvent[] = [];
+    let cursor = currentSequence(roomId);
+    for (const event of candidates) {
+      if (seenIds.has(event.id)) continue;
+      if (event.roomSeq <= cursor) continue;
+      if (event.roomSeq !== cursor + 1) {
+        throw new Error(`Room event sequence gap after ${cursor}`);
+      }
+      seenIds.add(event.id);
+      events.push(event);
+      cursor = event.roomSeq;
     }
-    const events = Object.freeze([
-      ...(state.eventsByRoom[event.roomId] ?? []),
-      immutableEvent(event)
+    return { events, cursor };
+  }
+
+  function commitAcceptedEvents(roomId: string, events: readonly RoomEvent[], epoch: number): void {
+    if (!isCurrent(epoch) || events.length === 0) return;
+    const roomEvents = Object.freeze([
+      ...(state.eventsByRoom[roomId] ?? []),
+      ...events.map(immutableEvent)
     ]);
     patchState({
-      eventsByRoom: Object.freeze({ ...state.eventsByRoom, [event.roomId]: events })
+      eventsByRoom: Object.freeze({ ...state.eventsByRoom, [roomId]: roomEvents })
     });
+  }
+
+  function acceptEvent(event: RoomEvent, epoch = lifecycleEpoch): void {
+    if (!isCurrent(epoch)) return;
+    const plan = planAcceptedEvents(event.roomId, [event]);
+    commitAcceptedEvents(event.roomId, plan.events, epoch);
   }
 
   async function runCatchUp(roomId: string, epoch: number): Promise<void> {
@@ -146,9 +183,11 @@ export function createTimelineStore(
       if (page.nextRoomSeq !== pageTail) {
         throw new Error("Replay nextRoomSeq does not match page tail");
       }
-      for (const event of page.events) {
-        acceptEvent(event, epoch);
+      const plan = planAcceptedEvents(roomId, page.events);
+      if (page.nextRoomSeq !== plan.cursor) {
+        throw new Error("Replay nextRoomSeq does not match accepted cursor");
       }
+      commitAcceptedEvents(roomId, plan.events, epoch);
       const nextCursor = currentSequence(roomId);
       const needsMore = page.hasMore
         || nextCursor < (state.snapshot.roomCursors[roomId] ?? 0);
@@ -174,7 +213,7 @@ export function createTimelineStore(
   const unsubscribe = api.subscribe((envelope) => {
     if (disposed) return;
     if (envelope.type === "room.event") {
-      if (workerGeneration !== null && envelope.workerGeneration !== workerGeneration) return;
+      if (!workerReady || envelope.workerGeneration !== workerGeneration) return;
       const eventEpoch = lifecycleEpoch;
       const event = envelope.payload;
       const current = currentSequence(event.roomId);
@@ -182,16 +221,17 @@ export function createTimelineStore(
         try {
           acceptEvent(event, eventEpoch);
         } catch (error) {
-          patchState({
+          patchStatus(eventEpoch, beginStatusOperation(), {
             connection: "error",
             error: error instanceof Error ? error.message : "Unable to accept room event"
           });
         }
       } else {
+        const eventStatusOperation = beginStatusOperation();
         void catchUp(event.roomId, eventEpoch)
           .then(() => acceptEvent(event, eventEpoch))
           .catch((error: unknown) => {
-            patchCurrent(eventEpoch, {
+            patchStatus(eventEpoch, eventStatusOperation, {
               connection: "error",
               error: error instanceof Error ? error.message : "Unable to replay room events"
             });
@@ -199,17 +239,27 @@ export function createTimelineStore(
       }
     } else if (envelope.type === "worker.disconnected") {
       if (workerGeneration !== null && envelope.workerGeneration !== workerGeneration) return;
+      workerReady = false;
       lifecycleEpoch += 1;
-      patchState({ connection: "reconnecting", error: null });
-    } else if (envelope.type === "worker.ready" && envelope.workerGeneration !== workerGeneration) {
+      patchStatus(lifecycleEpoch, beginStatusOperation(), {
+        connection: "reconnecting",
+        error: null
+      });
+    } else if (
+      envelope.type === "worker.ready"
+      && (!workerReady || envelope.workerGeneration !== workerGeneration)
+    ) {
+      const isNewGeneration = envelope.workerGeneration !== workerGeneration;
       workerGeneration = envelope.workerGeneration;
-      lifecycleEpoch += 1;
+      workerReady = true;
+      if (isNewGeneration) lifecycleEpoch += 1;
       void hydrateForEpoch(lifecycleEpoch);
     }
   });
 
   async function runHydrate(epoch: number): Promise<void> {
-    patchCurrent(epoch, {
+    const statusOperation = beginStatusOperation();
+    patchStatus(epoch, statusOperation, {
       connection: hasHydrated ? "reconnecting" : "bootstrapping",
       error: null
     });
@@ -221,6 +271,10 @@ export function createTimelineStore(
       });
       if (!isCurrent(epoch)) return;
       if (!response.payload.ok) throw new Error(response.payload.message);
+      if (workerGeneration === null) {
+        workerGeneration = response.workerGeneration;
+        workerReady = true;
+      }
       const parsedSnapshot = AppSnapshotSchema.safeParse(response.payload.data);
       if (!parsedSnapshot.success) throw new Error("Unable to load application state");
       const snapshot = immutableSnapshot(parsedSnapshot.data);
@@ -234,10 +288,10 @@ export function createTimelineStore(
       ))?.id ?? null;
       patchCurrent(epoch, { snapshot, selectedProjectId, selectedRoomId });
       if (selectedRoomId !== null) await catchUp(selectedRoomId, epoch);
-      patchCurrent(epoch, { connection: "ready", error: null });
+      patchStatus(epoch, statusOperation, { connection: "ready", error: null });
       if (isCurrent(epoch)) hasHydrated = true;
     } catch (error) {
-      patchCurrent(epoch, {
+      patchStatus(epoch, statusOperation, {
         connection: "error",
         error: error instanceof Error ? error.message : "Unable to load application state"
       });
@@ -280,6 +334,7 @@ export function createTimelineStore(
   async function selectRoom(roomId: string): Promise<void> {
     if (disposed) return;
     const operationEpoch = lifecycleEpoch;
+    const statusOperation = beginStatusOperation();
     const selectedRoom = state.snapshot.rooms.find((candidate) => candidate.id === roomId);
     if (!selectedRoom) throw new Error("Room is not present in the current snapshot");
     patchCurrent(operationEpoch, {
@@ -291,7 +346,7 @@ export function createTimelineStore(
     } catch (error) {
       if (!isCurrent(operationEpoch)) return;
       const message = error instanceof Error ? error.message : "Unable to replay room events";
-      patchCurrent(operationEpoch, { connection: "error", error: message });
+      patchStatus(operationEpoch, statusOperation, { connection: "error", error: message });
       throw new Error(message, { cause: error });
     }
   }
@@ -308,6 +363,7 @@ export function createTimelineStore(
     async addProject() {
       if (disposed) return;
       const operationEpoch = lifecycleEpoch;
+      const statusOperation = beginStatusOperation();
       try {
         const response = await api.request({
           type: "project.pickExisting",
@@ -316,7 +372,10 @@ export function createTimelineStore(
         });
         if (!isCurrent(operationEpoch)) return;
         if (!response.payload.ok) {
-          patchCurrent(operationEpoch, { connection: "error", error: response.payload.message });
+          patchStatus(operationEpoch, statusOperation, {
+            connection: "error",
+            error: response.payload.message
+          });
           return;
         }
         if (response.payload.requestType !== "project.pickExisting") {
@@ -334,7 +393,7 @@ export function createTimelineStore(
         if (!parsedProject.success) throw new Error("Unable to add project");
         await forceFreshHydrate(operationEpoch);
       } catch (error) {
-        patchCurrent(operationEpoch, {
+        patchStatus(operationEpoch, statusOperation, {
           connection: "error",
           error: error instanceof Error ? error.message : "Unable to add project"
         });
@@ -345,6 +404,7 @@ export function createTimelineStore(
       const trimmedTitle = title.trim();
       if (trimmedTitle.length === 0) throw new Error("Room title is required");
       const operationEpoch = lifecycleEpoch;
+      const statusOperation = beginStatusOperation();
       try {
         const response = await api.request({
           type: "room.create",
@@ -353,7 +413,10 @@ export function createTimelineStore(
         });
         if (!isCurrent(operationEpoch)) return;
         if (!response.payload.ok) {
-          patchCurrent(operationEpoch, { connection: "error", error: response.payload.message });
+          patchStatus(operationEpoch, statusOperation, {
+            connection: "error",
+            error: response.payload.message
+          });
           return;
         }
         if (response.payload.requestType !== "room.create") {
@@ -367,7 +430,7 @@ export function createTimelineStore(
         if (!isCurrent(operationEpoch) || state.connection === "error") return;
         await selectRoom(createdRoom.id);
       } catch (error) {
-        patchCurrent(operationEpoch, {
+        patchStatus(operationEpoch, statusOperation, {
           connection: "error",
           error: error instanceof Error ? error.message : "Unable to create room"
         });
@@ -378,6 +441,7 @@ export function createTimelineStore(
       const trimmedBody = body.trim();
       if (trimmedBody.length === 0) throw new Error("Message body is required");
       const operationEpoch = lifecycleEpoch;
+      const statusOperation = beginStatusOperation();
       try {
         const response = await api.request({
           type: "message.post",
@@ -386,7 +450,10 @@ export function createTimelineStore(
         });
         if (!isCurrent(operationEpoch)) return;
         if (!response.payload.ok) {
-          patchCurrent(operationEpoch, { connection: "error", error: response.payload.message });
+          patchStatus(operationEpoch, statusOperation, {
+            connection: "error",
+            error: response.payload.message
+          });
           return;
         }
         if (response.payload.requestType !== "message.post") {
@@ -396,7 +463,7 @@ export function createTimelineStore(
         if (!parsedEvent.success) throw new Error("Unable to post message");
         acceptEvent(parsedEvent.data, operationEpoch);
       } catch (error) {
-        patchCurrent(operationEpoch, {
+        patchStatus(operationEpoch, statusOperation, {
           connection: "error",
           error: error instanceof Error ? error.message : "Unable to post message"
         });
@@ -405,6 +472,7 @@ export function createTimelineStore(
     dispose() {
       if (disposed) return;
       disposed = true;
+      workerReady = false;
       lifecycleEpoch += 1;
       unsubscribe();
       listeners.clear();

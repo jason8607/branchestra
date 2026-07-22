@@ -631,7 +631,7 @@ describe("timeline store", () => {
 
     await store.hydrate();
 
-    expect(store.getState().eventsByRoom[ROOM_ID]?.map((event) => event.roomSeq)).toEqual([1]);
+    expect(store.getState().eventsByRoom[ROOM_ID]).toBeUndefined();
     expect(store.getState()).toMatchObject({
       connection: "error",
       error: "Room event sequence gap after 1"
@@ -1066,5 +1066,105 @@ describe("timeline store", () => {
       connection: "error",
       error: "Unable to replay room events"
     });
+  });
+
+  it("ignores late live events from a disconnected generation before the replacement is ready", async () => {
+    const nextGeneration = "50000000-0000-4000-8000-000000000002";
+    const fixture = timelineApiFixture({
+      snapshot: foundationSnapshot(0),
+      replayPages: [eventPage([], false), eventPage([], false)]
+    });
+    const store = createTimelineStore(fixture.api, sequentialIds());
+    await store.hydrate();
+
+    fixture.emit(workerEvent("worker.disconnected", GENERATION));
+    fixture.emit(roomEventEnvelope(messageEvent(1), GENERATION));
+    expect(store.getState().eventsByRoom[ROOM_ID]).toBeUndefined();
+
+    fixture.emit(workerEvent("worker.ready", nextGeneration));
+    await fixture.flush();
+    expect(store.getState()).toMatchObject({ connection: "ready", error: null });
+    expect(store.getState().eventsByRoom[ROOM_ID]).toBeUndefined();
+  });
+
+  it("does not let an older hydrate clear a newer room-selection replay error", async () => {
+    const roomTwo = room("20000000-0000-4000-8000-000000000002");
+    const oldRoomReplay = deferred<WorkerResponseEnvelope>();
+    const fixture = apiHarness((command) => {
+      if (command.type === "state.getSnapshot") {
+        return successResponse(command, {
+          projects: [project()],
+          rooms: [room(), roomTwo],
+          roomCursors: { [ROOM_ID]: 0, [roomTwo.id]: 0 }
+        });
+      }
+      if (command.type === "room.replay" && command.payload.roomId === ROOM_ID) {
+        return oldRoomReplay.promise;
+      }
+      if (command.type === "room.replay") return failureResponse(command, "Room B replay failed");
+      throw new Error(`Unexpected command: ${command.type}`);
+    });
+    const store = createTimelineStore(fixture.api, sequentialIds());
+    const oldHydration = store.hydrate();
+    for (let turn = 0; turn < 5; turn += 1) await Promise.resolve();
+
+    await expect(store.selectRoom(roomTwo.id)).rejects.toThrow("Room B replay failed");
+    expect(store.getState()).toMatchObject({ connection: "error", error: "Room B replay failed" });
+    const oldReplayCommand = fixture.commands.find((command) => (
+      command.type === "room.replay" && command.payload.roomId === ROOM_ID
+    ));
+    if (!oldReplayCommand) throw new Error("Expected older Room A replay");
+    oldRoomReplay.resolve(successResponse(oldReplayCommand, eventPage([], false)));
+    await oldHydration;
+
+    expect(store.getState()).toMatchObject({
+      connection: "error",
+      error: "Room B replay failed",
+      selectedRoomId: roomTwo.id
+    });
+  });
+
+  it("rejects an unsorted duplicate tail against the actually accepted cursor atomically", async () => {
+    const duplicateTailPage: RoomEventPage = {
+      roomId: ROOM_ID,
+      events: [messageEvent(1), messageEvent(2), messageEvent(1)],
+      nextRoomSeq: 1,
+      hasMore: false
+    };
+    const fixture = timelineApiFixture({
+      snapshot: foundationSnapshot(2),
+      replayPages: [duplicateTailPage]
+    });
+    const store = createTimelineStore(fixture.api, sequentialIds());
+
+    await store.hydrate();
+
+    expect(store.getState()).toMatchObject({
+      connection: "error",
+      error: "Replay nextRoomSeq does not match accepted cursor"
+    });
+    expect(store.getState().eventsByRoom).toEqual({});
+  });
+
+  it("rejects a reused event ID at a higher sequence against the accepted cursor atomically", async () => {
+    const reusedIdPage: RoomEventPage = {
+      roomId: ROOM_ID,
+      events: [messageEvent(1), messageEvent(2, { id: messageEvent(1).id })],
+      nextRoomSeq: 2,
+      hasMore: false
+    };
+    const fixture = timelineApiFixture({
+      snapshot: foundationSnapshot(2),
+      replayPages: [reusedIdPage]
+    });
+    const store = createTimelineStore(fixture.api, sequentialIds());
+
+    await store.hydrate();
+
+    expect(store.getState()).toMatchObject({
+      connection: "error",
+      error: "Replay nextRoomSeq does not match accepted cursor"
+    });
+    expect(store.getState().eventsByRoom).toEqual({});
   });
 });
