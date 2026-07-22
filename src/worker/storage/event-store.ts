@@ -38,7 +38,7 @@ export function createEventStore(database: Database, repositories: DomainReposit
           throw new NotFoundError(`Room not found: ${input.roomId}`);
         }
         const row = database.prepare("SELECT COALESCE(MAX(room_seq), 0) + 1 AS next_seq FROM room_events WHERE room_id = ?").get(input.roomId) as { next_seq: number };
-        const event = RoomEventSchema.parse({ ...input, roomSeq: row.next_seq });
+        const event = RoomEventSchema.parse({ ...input, roomSeq: row.next_seq }) as Extract<RoomEvent, { type: "message.posted" }>;
         if (event.payload.roomId !== event.roomId) {
           throw new Error(`Event payload roomId does not match event roomId: ${event.id}`);
         }

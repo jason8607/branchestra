@@ -22,7 +22,7 @@ export function Timeline(props: { events: readonly RoomEvent[] }): React.JSX.Ele
                   #{String(event.roomSeq).padStart(4, "0")}
                 </span>
               </header>
-              <p className="event-body">{event.payload.body}</p>
+              <p className="event-body">{event.type === "message.posted" ? event.payload.body : event.type}</p>
             </article>
           </li>
         ))}

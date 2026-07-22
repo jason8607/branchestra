@@ -3,9 +3,9 @@ import type {
   Clock,
   IdGenerator,
   Room,
-  RoomEvent,
   RoomEventCursor,
-  RoomEventPage
+  RoomEventPage,
+  UserMessageRoomEvent
 } from "../../shared/contracts/domain";
 import { RoomEventSchema, RoomSchema, UserMessageSchema } from "../../shared/contracts/domain";
 import { NotFoundError } from "./errors";
@@ -27,7 +27,7 @@ export interface RoomServiceDependencies {
 
 export interface RoomService {
   createRoom(input: { projectId: string; title: string }, metadata: DurableCommand): DurableResult<Room>;
-  postUserMessage(input: { roomId: string; body: string }, metadata: DurableCommand): DurableResult<RoomEvent>;
+  postUserMessage(input: { roomId: string; body: string }, metadata: DurableCommand): DurableResult<UserMessageRoomEvent>;
   getSnapshot(): AppSnapshot;
   replayRoom(cursor: RoomEventCursor): RoomEventPage;
 }
@@ -51,7 +51,7 @@ export function createRoomService(dependencies: RoomServiceDependencies): RoomSe
       });
     },
     postUserMessage(input, metadata) {
-      const replayed = dependencies.idempotencyStore.replay(metadata, RoomEventSchema);
+      const replayed = dependencies.idempotencyStore.replay(metadata, RoomEventSchema) as DurableResult<UserMessageRoomEvent> | undefined;
       if (replayed) return replayed;
       const validatedInput = UserMessageSchema.pick({ roomId: true, body: true }).parse(input);
       return dependencies.idempotencyStore.execute(metadata, RoomEventSchema, () => {
@@ -73,7 +73,7 @@ export function createRoomService(dependencies: RoomServiceDependencies): RoomSe
           },
           createdAt
         });
-      });
+      }) as DurableResult<UserMessageRoomEvent>;
     },
     getSnapshot: () => dependencies.eventStore.snapshot(),
     replayRoom: (cursor) => dependencies.eventStore.after(cursor)

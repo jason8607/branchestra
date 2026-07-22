@@ -97,6 +97,8 @@ export function registerRendererGateway(dependencies: RendererGatewayDependencie
           workerGeneration: activeGeneration
         });
         break;
+      default:
+        throw new Error(`Unsupported renderer command: ${request.type}`);
     }
     const workerResponse = parseEnvelope(WorkerResponseEnvelopeSchema,
       await dependencies.supervisor.request(workerRequest)

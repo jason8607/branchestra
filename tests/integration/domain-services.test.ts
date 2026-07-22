@@ -71,7 +71,8 @@ describe("foundation domain services", () => {
       );
 
       expect(replayed).toMatchObject({ replayed: true, value: { id: first.value.id, roomSeq: 1 } });
-      expect(rooms.replayRoom({ roomId: roomA.id, roomSeq: 0, limit: 100 }).events.map((event) => event.payload.body)).toEqual(["Persist this"]);
+      expect(rooms.replayRoom({ roomId: roomA.id, roomSeq: 0, limit: 100 }).events
+        .filter((event) => event.type === "message.posted").map((event) => event.payload.body)).toEqual(["Persist this"]);
       expect(rooms.replayRoom({ roomId: roomB.id, roomSeq: 0, limit: 100 }).events).toEqual([]);
       expect(rooms.getSnapshot()).toMatchObject({
         projects: [{ id: project.id }],

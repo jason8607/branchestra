@@ -8,6 +8,7 @@ import {
   RoomSchema,
   SnapshotPageSchema
 } from "./domain";
+import type { FinalApprovalTuple } from "./domain";
 
 export const PROTOCOL_VERSION = 1 as const;
 export const MAX_IPC_BYTES = 65_536;
@@ -29,13 +30,51 @@ const snapshotPageRequest = z.object({
 const snapshotRequest = z.union([empty, snapshotPageRequest]);
 const roomCreate = z.object({ projectId: UuidSchema, title: z.string().trim().min(1).max(120) }).strict();
 const messagePost = z.object({ roomId: UuidSchema, body: z.string().trim().min(1).max(20_000) }).strict();
+const TaskIdSchema = z.string().min(1);
+const ApprovalRequestIdSchema = z.string().min(1);
+const ScopeHashSchema = z.string().regex(/^sha256:.+/);
+const TaskTargetRefSchema = z.string().regex(/^refs\/heads\/[A-Za-z0-9._/-]+$/);
+const TaskOidSchema = z.string().regex(/^[0-9a-f]{40,64}$/);
+const finalApprovalTuple = z.object({
+  targetRef: TaskTargetRefSchema,
+  baseOid: TaskOidSchema,
+  candidateOid: TaskOidSchema,
+  diffHash: ScopeHashSchema,
+  testSetHash: ScopeHashSchema
+}).strict();
+const taskGet = z.object({ taskId: TaskIdSchema }).strict();
+const taskApproveScope = z.object({
+  taskId: TaskIdSchema, approvalRequestId: ApprovalRequestIdSchema,
+  decision: z.enum(["approved", "rejected"]), displayedScopeHash: ScopeHashSchema
+}).strict();
+const taskCancel = z.object({ taskId: TaskIdSchema, reason: z.enum(["user", "quit", "timeout"]) }).strict();
+const taskRequestRevision = z.object({ taskId: TaskIdSchema, instruction: z.string().min(1) }).strict();
+const taskGrantAdditionalRound = z.object({
+  taskId: TaskIdSchema, approvalRequestId: ApprovalRequestIdSchema,
+  additionalRounds: z.union([z.literal(1), z.literal(2)]), displayedScopeHash: ScopeHashSchema
+}).strict();
+const taskApproveFinalMerge = z.object({ taskId: TaskIdSchema, approvalRequestId: ApprovalRequestIdSchema })
+  .extend(finalApprovalTuple.shape).strict();
+const taskRecoveryResolve = z.object({
+  taskId: TaskIdSchema, previewHash: ScopeHashSchema,
+  decision: z.enum(["resume_recorded_phase", "keep_observed_state", "cancel_and_retain"]),
+  selectedOperationIds: z.array(z.string().min(1))
+}).strict();
 
 export const RendererRequestEnvelopeSchema = z.discriminatedUnion("type", [
   z.object({ ...base, workerGeneration: z.union([GenerationSchema, z.literal(ZERO_WORKER_GENERATION)]), type: z.literal("state.getSnapshot"), payload: snapshotRequest }).strict(),
   z.object({ ...base, type: z.literal("room.replay"), payload: RoomEventCursorSchema }).strict(),
   z.object({ ...base, type: z.literal("project.pickExisting"), payload: empty }).strict(),
   z.object({ ...base, type: z.literal("room.create"), payload: roomCreate }).strict(),
-  z.object({ ...base, type: z.literal("message.post"), payload: messagePost }).strict()
+  z.object({ ...base, type: z.literal("message.post"), payload: messagePost }).strict(),
+  z.object({ ...base, type: z.literal("task.get"), payload: taskGet }).strict(),
+  z.object({ ...base, type: z.literal("task.approveScope"), payload: taskApproveScope }).strict(),
+  z.object({ ...base, type: z.literal("task.cancel"), payload: taskCancel }).strict(),
+  z.object({ ...base, type: z.literal("task.requestRevision"), payload: taskRequestRevision }).strict(),
+  z.object({ ...base, type: z.literal("task.grantAdditionalRound"), payload: taskGrantAdditionalRound }).strict(),
+  z.object({ ...base, type: z.literal("task.approveFinalMerge"), payload: taskApproveFinalMerge }).strict(),
+  z.object({ ...base, type: z.literal("task.recovery.preview"), payload: taskGet }).strict(),
+  z.object({ ...base, type: z.literal("task.recovery.resolve"), payload: taskRecoveryResolve }).strict()
 ]);
 
 export const WorkerRequestEnvelopeSchema = z.discriminatedUnion("type", [
@@ -78,6 +117,15 @@ export type RendererCommand = CommandFromEnvelope<RendererRequestEnvelope> exten
     : never
   : never;
 export type WorkerCommand = CommandFromEnvelope<WorkerRequestEnvelope>;
+export type TaskWorkerCommand =
+  | { type: "task.get"; payload: { taskId: string } }
+  | { type: "task.approveScope"; payload: { taskId: string; approvalRequestId: string; decision: "approved" | "rejected"; displayedScopeHash: string } }
+  | { type: "task.cancel"; payload: { taskId: string; reason: "user" | "quit" | "timeout" } }
+  | { type: "task.requestRevision"; payload: { taskId: string; instruction: string } }
+  | { type: "task.grantAdditionalRound"; payload: { taskId: string; approvalRequestId: string; additionalRounds: 1 | 2; displayedScopeHash: string } }
+  | ({ type: "task.approveFinalMerge"; payload: { taskId: string; approvalRequestId: string } & FinalApprovalTuple })
+  | { type: "task.recovery.preview"; payload: { taskId: string } }
+  | { type: "task.recovery.resolve"; payload: { taskId: string; previewHash: string; decision: "resume_recorded_phase" | "keep_observed_state" | "cancel_and_retain"; selectedOperationIds: string[] } };
 export type WorkerResponsePayload = WorkerResponseEnvelope["payload"];
 
 export function assertEnvelopeSize(value: unknown): void {

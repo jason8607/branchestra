@@ -54,7 +54,7 @@ function immutableEvent(event: RoomEvent): RoomEvent {
   return Object.freeze({
     ...event,
     payload: Object.freeze({ ...event.payload })
-  });
+  }) as RoomEvent;
 }
 
 export function createTimelineStore(
