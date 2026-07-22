@@ -10,6 +10,7 @@ import {
   RoomEventPageSchema,
   RoomEventSchema
 } from "../../shared/contracts/domain";
+import { NotFoundError } from "../domain/errors";
 import type { Database } from "./database";
 import type { DomainRepositories } from "./repositories";
 
@@ -33,7 +34,7 @@ export function createEventStore(database: Database, repositories: DomainReposit
     append(input) {
       return database.transaction(() => {
         if (!repositories.rooms.findById(input.roomId)) {
-          throw new Error(`Room not found: ${input.roomId}`);
+          throw new NotFoundError(`Room not found: ${input.roomId}`);
         }
         const row = database.prepare("SELECT COALESCE(MAX(room_seq), 0) + 1 AS next_seq FROM room_events WHERE room_id = ?").get(input.roomId) as { next_seq: number };
         const event = RoomEventSchema.parse({ ...input, roomSeq: row.next_seq });

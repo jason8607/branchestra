@@ -4,6 +4,7 @@ import {
   type WorkerRequestEnvelope,
   type WorkerResponseEnvelope
 } from "../../shared/contracts/protocol";
+import { NotFoundError } from "../domain/errors";
 import { GitRepositoryError } from "../git/inspect-repository";
 import { IdempotencyConflictError } from "../storage/idempotency-store";
 import {
@@ -19,7 +20,13 @@ export function createWorkerRouter(options: {
   workerGeneration: string;
   handlers: readonly AnyCommandHandler[];
 }): (envelope: WorkerRequestEnvelope) => Promise<WorkerResponseEnvelope> {
-  const handlers = new Map(options.handlers.map((handler) => [handler.type, handler]));
+  const handlers = new Map<WorkerCommand["type"], AnyCommandHandler>();
+  for (const handler of options.handlers) {
+    if (handlers.has(handler.type)) {
+      throw new Error(`Duplicate worker handler registration: ${handler.type}`);
+    }
+    handlers.set(handler.type, handler);
+  }
 
   return async (envelope) => {
     const fail = (code: ErrorCode, message: string): WorkerResponseEnvelope => WorkerResponseEnvelopeSchema.parse({
@@ -59,7 +66,7 @@ export function createWorkerRouter(options: {
     } catch (error) {
       if (error instanceof IdempotencyConflictError) return fail("IDEMPOTENCY_CONFLICT", error.message);
       if (error instanceof GitRepositoryError) return fail("GIT_INVALID", error.message);
-      if (error instanceof Error && error.message.toLowerCase().includes("not found")) {
+      if (error instanceof NotFoundError) {
         return fail("NOT_FOUND", error.message);
       }
       return fail("INTERNAL", "Worker command failed");

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ProjectSchema } from "../../src/shared/contracts/domain";
+import { NotFoundError } from "../../src/worker/domain/errors";
 import { openDatabase } from "../../src/worker/storage/database";
 import { createEventStore } from "../../src/worker/storage/event-store";
 import {
@@ -14,6 +15,32 @@ import {
 import type { Database } from "../../src/worker/storage/database";
 
 describe("event storage", () => {
+  it("throws a dedicated error when appending to a missing room", () => {
+    const database = openDatabase(":memory:");
+    try {
+      runMigrations(database);
+      const events = createEventStore(database, createRepositories(database));
+      const input = {
+        id: "30000000-0000-4000-8000-000000000001",
+        roomId: "20000000-0000-4000-8000-000000000001",
+        type: "message.posted" as const,
+        actor: "user" as const,
+        payload: {
+          id: "40000000-0000-4000-8000-000000000001",
+          roomId: "20000000-0000-4000-8000-000000000001",
+          body: "missing room",
+          createdAt: "2026-07-21T10:03:00.000Z"
+        },
+        createdAt: "2026-07-21T10:03:00.000Z"
+      };
+
+      expect(() => events.append(input)).toThrow("Room not found: 20000000-0000-4000-8000-000000000001");
+      expect(() => events.append(input)).toThrow(NotFoundError);
+    } finally {
+      database.close();
+    }
+  });
+
   it("allocates room_seq per room and replays after a cursor", () => {
     const database = openDatabase(":memory:");
     try {

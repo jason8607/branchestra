@@ -8,6 +8,7 @@ import {
 import { runMigrations } from "../../src/worker/storage/migrations";
 import { createRepositories } from "../../src/worker/storage/repositories";
 import { createProjectService } from "../../src/worker/domain/project-service";
+import { NotFoundError } from "../../src/worker/domain/errors";
 import { createRoomService } from "../../src/worker/domain/room-service";
 
 describe("foundation domain services", () => {
@@ -306,6 +307,10 @@ describe("foundation domain services", () => {
         metadata("missing-project", "room.create")
       )).toThrow(/Project not found/);
       expect(() => rooms.createRoom(
+        { projectId: "10000000-0000-4000-8000-000000000002", title: "Valid" },
+        metadata("missing-project-class", "room.create")
+      )).toThrow(NotFoundError);
+      expect(() => rooms.createRoom(
         { projectId: project.id, title: " " },
         metadata("invalid-title", "room.create")
       )).toThrow();
@@ -313,6 +318,10 @@ describe("foundation domain services", () => {
         { roomId: "20000000-0000-4000-8000-000000000002", body: "Valid" },
         metadata("missing-room", "message.post")
       )).toThrow(/Room not found/);
+      expect(() => rooms.postUserMessage(
+        { roomId: "20000000-0000-4000-8000-000000000002", body: "Valid" },
+        metadata("missing-room-class", "message.post")
+      )).toThrow(NotFoundError);
       expect(() => rooms.postUserMessage(
         { roomId: "20000000-0000-4000-8000-000000000002", body: " " },
         metadata("invalid-body", "message.post")
