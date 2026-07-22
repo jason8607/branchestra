@@ -44,6 +44,7 @@ Every implementation plan uses exact versions. Upgrade them only in a dedicated 
 | React / React DOM | `19.2.7` | Renderer. |
 | Vite | `7.3.6` | Renderer/build pipeline within electron-vite 5's supported peer range. |
 | `@vitejs/plugin-react` | `5.2.0` | React compilation compatible with Vite 7. |
+| `@swc/core` | `1.15.46` | Exact optional electron-vite peer required by its published strict TypeScript declarations; development-only. |
 | Zod | `4.4.3` | Versioned trust-boundary schemas. |
 | Vitest | `4.1.10` | Unit, contract, and integration tests. |
 | Playwright Test | `1.61.1` | Electron and packaged-app journeys. |

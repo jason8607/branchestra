@@ -6,13 +6,13 @@
 
 **Architecture:** Electron Main owns only the secure window, native project-directory dialog, single-instance lifecycle, renderer IPC validation, and a supervised `utilityProcess`. The utility worker is the sole owner of `node:sqlite`, the durable worker lease, Git validation, domain services, and command handling; every state mutation is deduplicated and committed before its response is acknowledged. Renderer state is rebuilt from a snapshot plus cursor replay through a preload bridge that exposes only `request` and `subscribe`.
 
-**Tech Stack:** Node.js 24.18.0, pnpm 11.15.1, Electron 43.1.1, electron-vite 5.0.0, React/React DOM 19.2.7, Vite 7.3.6, `@vitejs/plugin-react` 5.2.0, TypeScript 6.0.3, Zod 4.4.3, `node:sqlite` `DatabaseSync`, Vitest 4.1.10, and Playwright 1.61.1.
+**Tech Stack:** Node.js 24.18.0, pnpm 11.15.1, Electron 43.1.1, electron-vite 5.0.0, React/React DOM 19.2.7, Vite 7.3.6, `@vitejs/plugin-react` 5.2.0, `@swc/core` 1.15.46, TypeScript 6.0.3, Zod 4.4.3, `node:sqlite` `DatabaseSync`, Vitest 4.1.10, and Playwright 1.61.1.
 
 ## Global Constraints
 
 - Use exactly Node.js `24.18.0` and declare it in `.nvmrc` and `package.json#engines.node`.
 - Use exactly pnpm `11.15.1` and declare `packageManager: "pnpm@11.15.1"`.
-- Pin Electron `43.1.1`, electron-vite `5.0.0`, React and React DOM `19.2.7`, Vite `7.3.6`, `@vitejs/plugin-react` `5.2.0`, TypeScript `6.0.3`, Zod `4.4.3`, Vitest `4.1.10`, and `@playwright/test` `1.61.1` without ranges.
+- Pin Electron `43.1.1`, electron-vite `5.0.0`, React and React DOM `19.2.7`, Vite `7.3.6`, `@vitejs/plugin-react` `5.2.0`, `@swc/core` `1.15.46`, TypeScript `6.0.3`, Zod `4.4.3`, Vitest `4.1.10`, and `@playwright/test` `1.61.1` without ranges.
 - Pin ESLint `10.6.0`, `@eslint/js` `10.0.1`, `typescript-eslint` `8.65.0`, `globals` `17.7.0`, Testing Library React/DOM/User Event `16.3.2`/`10.4.1`/`14.6.1`, and jsdom `29.1.1` without ranges; later milestones consume these existing tools rather than installing them after first use.
 - Keep one package, ESM (`"type": "module"`), strict TypeScript, `noUncheckedIndexedAccess`, and `exactOptionalPropertyTypes`.
 - Keep source roots exactly under `src/main`, `src/preload`, `src/renderer`, `src/worker`, and `src/shared/contracts`; keep tests under `tests/unit`, `tests/integration`, `tests/fixtures`, and `e2e`.
@@ -30,7 +30,7 @@
 - Inject the project dialog adapter in tests. The Electron E2E fixed-path adapter is enabled only by an explicit E2E process flag and remains Main-side.
 - Milestone 1 includes projects, rooms, local user messages, snapshot/replay, worker supervision, and the timeline shell. It excludes tasks, worktrees, approvals, Provider adapters, Agent runs, SDKs, and Provider processes.
 - Use `pnpm test:unit`, `pnpm test:integration`, `pnpm test:e2e`, `pnpm typecheck`, and `pnpm build` as the stable verification scripts consumed by later milestones.
-- Keep pnpm 11 dependency scripts fail-closed: `pnpm-workspace.yaml` may allow only `esbuild: true`; any newly discovered build script is a review blocker rather than an interactive blanket approval.
+- Keep pnpm 11 dependency scripts fail-closed: `pnpm-workspace.yaml` may allow only `esbuild: true` and `'@swc/core': true`; any newly discovered build script is a review blocker rather than an interactive blanket approval.
 
 ---
 
@@ -126,6 +126,7 @@ Create `.nvmrc` with `24.18.0`, create `.gitignore` with `node_modules`, `out`, 
   "devDependencies": {
     "@eslint/js": "10.0.1",
     "@playwright/test": "1.61.1",
+    "@swc/core": "1.15.46",
     "@testing-library/dom": "10.4.1",
     "@testing-library/react": "16.3.2",
     "@testing-library/user-event": "14.6.1",
@@ -151,6 +152,7 @@ Create the project-level pnpm 11 build allowlist exactly as follows; do not use 
 ```yaml
 # pnpm-workspace.yaml
 allowBuilds:
+  '@swc/core': true
   esbuild: true
 ```
 
@@ -273,7 +275,7 @@ Run: `corepack pnpm install`
 
 Run: `corepack pnpm peers check`
 
-Expected: pnpm reports version `11.15.1`, installs only the exact direct versions above (including Renderer test and lint tooling), creates `pnpm-lock.yaml`, exits without `ERR_PNPM_IGNORED_BUILDS`, and reports no peer issues. Because pnpm 11 defaults `strictDepBuilds` to true, any build script other than the reviewed `esbuild` entry fails installation.
+Expected: pnpm reports version `11.15.1`, installs only the exact direct versions above (including Renderer test and lint tooling), creates `pnpm-lock.yaml`, exits without `ERR_PNPM_IGNORED_BUILDS`, and reports no peer issues. Because pnpm 11 defaults `strictDepBuilds` to true, any build script other than the reviewed `esbuild` and `@swc/core` entries fails installation.
 
 - [ ] **Step 3: Run the security test to verify it fails**
 
