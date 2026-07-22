@@ -131,6 +131,78 @@ describe("foundation domain services", () => {
     }
   });
 
+  it("persists the filesystem root with a non-empty display name and one ID", async () => {
+    const database = openDatabase(":memory:");
+    try {
+      runMigrations(database);
+      const repositories = createRepositories(database);
+      let idCalls = 0;
+      const projects = createProjectService({
+        repositories,
+        idempotencyStore: createIdempotencyStore(database, () => "2026-07-21T12:00:00.000Z"),
+        inspectRepository: async () => ({
+          repositoryRoot: "/",
+          gitCommonDir: "/.git",
+          headOid: "a".repeat(40),
+          defaultBranch: "main"
+        }),
+        clock: { now: () => "2026-07-21T12:00:00.000Z" },
+        ids: { next: () => {
+          idCalls += 1;
+          return "10000000-0000-4000-8000-000000000001";
+        } }
+      });
+
+      const result = await projects.addExistingProject({ selectedPath: "/" }, {
+        idempotencyKey: "root-project",
+        requestType: "project.addExisting",
+        requestHash: "root-project-hash",
+        workerGeneration: "50000000-0000-4000-8000-000000000001"
+      });
+
+      expect(result).toMatchObject({ value: { repositoryRoot: "/", displayName: "/" }, replayed: false });
+      expect(repositories.projects.findById(result.value.id)).toEqual(result.value);
+      expect(idCalls).toBe(1);
+    } finally {
+      database.close();
+    }
+  });
+
+  it("validates a derived project display name before allocating an ID", async () => {
+    const database = openDatabase(":memory:");
+    try {
+      runMigrations(database);
+      const repositories = createRepositories(database);
+      let idCalls = 0;
+      const projects = createProjectService({
+        repositories,
+        idempotencyStore: createIdempotencyStore(database, () => "2026-07-21T12:00:00.000Z"),
+        inspectRepository: async () => ({
+          repositoryRoot: `/${"a".repeat(201)}`,
+          gitCommonDir: "/.git",
+          headOid: "a".repeat(40),
+          defaultBranch: "main"
+        }),
+        clock: { now: () => "2026-07-21T12:00:00.000Z" },
+        ids: { next: () => {
+          idCalls += 1;
+          return "10000000-0000-4000-8000-000000000001";
+        } }
+      });
+
+      await expect(projects.addExistingProject({ selectedPath: "/chosen" }, {
+        idempotencyKey: "long-name-project",
+        requestType: "project.addExisting",
+        requestHash: "long-name-project-hash",
+        workerGeneration: "50000000-0000-4000-8000-000000000001"
+      })).rejects.toThrow();
+      expect(idCalls).toBe(0);
+      expect(database.prepare("SELECT count(*) AS count FROM idempotency_records").get()).toEqual({ count: 0 });
+    } finally {
+      database.close();
+    }
+  });
+
   it("replays completed room and message commands before validation or dependency checks", () => {
     const database = openDatabase(":memory:");
     try {

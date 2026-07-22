@@ -33,10 +33,13 @@ export function createProjectService(dependencies: ProjectServiceDependencies): 
       return dependencies.idempotencyStore.execute(metadata, ProjectSchema, () => {
         const existing = dependencies.repositories.projects.findByRepositoryRoot(inspection.repositoryRoot);
         if (existing) return existing;
+        const displayName = ProjectSchema.shape.displayName.parse(
+          basename(inspection.repositoryRoot) || inspection.repositoryRoot
+        );
         return dependencies.repositories.projects.insert(ProjectSchema.parse({
           id: dependencies.ids.next(),
           ...inspection,
-          displayName: basename(inspection.repositoryRoot),
+          displayName,
           createdAt: dependencies.clock.now()
         }));
       });
