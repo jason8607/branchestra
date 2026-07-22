@@ -3,9 +3,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it, vi } from "vitest";
+import {
+  WorkerEventEnvelopeSchema,
+  WorkerRequestEnvelopeSchema,
+  WorkerResponseEnvelopeSchema
+} from "../../src/shared/contracts/protocol";
 import { openDatabase } from "../../src/worker/storage/database";
 import { createWorkerLeaseStore, type WorkerIdentity } from "../../src/worker/storage/worker-lease-store";
 import { startWorker, type WorkerPort } from "../../src/worker/runtime";
+import { runMigrations } from "../../src/worker/storage/migrations";
+import { createRepositories } from "../../src/worker/storage/repositories";
 
 interface FakePort extends WorkerPort {
   sent: unknown[];
@@ -322,6 +329,98 @@ describe("worker runtime lease", () => {
       acquisitionSpy.mockRestore();
     } finally {
       vi.restoreAllMocks();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("posts one room event after a new message response and not after its replay", async () => {
+    const root = mkdtempSync(join(tmpdir(), "branchestra-worker-"));
+    const dbPath = join(root, "branchestra.sqlite3");
+    const generation = "50000000-0000-4000-8000-000000000070";
+    const projectId = "20000000-0000-4000-8000-000000000070";
+    const roomId = "30000000-0000-4000-8000-000000000070";
+    const message = WorkerRequestEnvelopeSchema.parse({
+      v: 1,
+      requestId: "10000000-0000-4000-8000-000000000070",
+      idempotencyKey: "message-post-70",
+      workerGeneration: generation,
+      type: "message.post",
+      payload: { roomId, body: "Hello from the worker runtime" }
+    });
+    let runtime: Awaited<ReturnType<typeof startWorker>> | undefined;
+    let seedDatabase: ReturnType<typeof openDatabase> | undefined;
+    try {
+      seedDatabase = openDatabase(dbPath);
+      runMigrations(seedDatabase);
+      const repositories = createRepositories(seedDatabase);
+      repositories.projects.insert({
+        id: projectId,
+        repositoryRoot: "/seeded/project",
+        gitCommonDir: "/seeded/project/.git",
+        displayName: "seeded-project",
+        headOid: "a".repeat(40),
+        defaultBranch: "main",
+        createdAt: "2026-07-22T00:00:00.000Z"
+      });
+      repositories.rooms.insert({
+        id: roomId,
+        projectId,
+        title: "Seeded room",
+        createdAt: "2026-07-22T00:00:00.000Z"
+      });
+      seedDatabase.close();
+      seedDatabase = undefined;
+
+      const port = fakePort();
+      runtime = await startWorker(startOptions(dbPath, port, generation, 170));
+      const sentBeforeMessage = port.sent.length;
+      port.emit(message);
+      await flushMessages();
+
+      const firstPosts = port.sent.slice(sentBeforeMessage);
+      expect(firstPosts).toHaveLength(2);
+      const response = WorkerResponseEnvelopeSchema.parse(firstPosts[0]);
+      expect(response).toMatchObject({
+        v: 1,
+        requestId: message.requestId,
+        idempotencyKey: message.idempotencyKey,
+        workerGeneration: generation,
+        type: "response",
+        payload: { ok: true, requestType: "message.post", replayed: false }
+      });
+      if (!response.payload.ok) throw new Error("Expected successful message.post response");
+      const event = WorkerEventEnvelopeSchema.parse(firstPosts[1]);
+      if (event.type !== "room.event") throw new Error("Expected room.event after response");
+      expect(event).toMatchObject({
+        v: 1,
+        requestId: message.requestId,
+        workerGeneration: generation,
+        type: "room.event"
+      });
+      expect(event.idempotencyKey).toBe(event.payload.id);
+      expect(event.payload).toEqual(response.payload.data);
+
+      const replayRequestId = "10000000-0000-4000-8000-000000000071";
+      const replayMessage = WorkerRequestEnvelopeSchema.parse({ ...message, requestId: replayRequestId });
+      const sentBeforeReplay = port.sent.length;
+      port.emit(replayMessage);
+      await flushMessages();
+      const replayPosts = port.sent.slice(sentBeforeReplay);
+      expect(replayPosts).toHaveLength(1);
+      const replay = WorkerResponseEnvelopeSchema.parse(replayPosts[0]);
+      expect(replay).toMatchObject({
+        requestId: replayRequestId,
+        idempotencyKey: message.idempotencyKey,
+        workerGeneration: generation,
+        payload: { ok: true, requestType: "message.post", replayed: true }
+      });
+      expect(port.sent.flatMap((value) => {
+        const parsed = WorkerEventEnvelopeSchema.safeParse(value);
+        return parsed.success && parsed.data.type === "room.event" ? [parsed.data] : [];
+      })).toHaveLength(1);
+    } finally {
+      seedDatabase?.close();
+      await runtime?.prepareQuit(Date.now() + 1_000);
       rmSync(root, { recursive: true, force: true });
     }
   });
