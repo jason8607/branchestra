@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { openDatabase } from "../../src/worker/storage/database";
 import { createEventStore } from "../../src/worker/storage/event-store";
-import { createIdempotencyStore } from "../../src/worker/storage/idempotency-store";
+import {
+  createIdempotencyStore,
+  IdempotencyConflictError
+} from "../../src/worker/storage/idempotency-store";
 import { runMigrations } from "../../src/worker/storage/migrations";
 import { createRepositories } from "../../src/worker/storage/repositories";
 import { createProjectService } from "../../src/worker/domain/project-service";
@@ -123,6 +126,75 @@ describe("foundation domain services", () => {
         replayed: true
       });
       expect({ inspectorCalls, idCalls }).toEqual({ inspectorCalls: 1, idCalls: 1 });
+    } finally {
+      database.close();
+    }
+  });
+
+  it("replays completed room and message commands before validation or dependency checks", () => {
+    const database = openDatabase(":memory:");
+    try {
+      runMigrations(database);
+      const repositories = createRepositories(database);
+      const project = repositories.projects.insert({
+        id: "10000000-0000-4000-8000-000000000001",
+        repositoryRoot: "/repo",
+        gitCommonDir: "/repo/.git",
+        displayName: "repo",
+        headOid: "a".repeat(40),
+        defaultBranch: "main",
+        createdAt: "2026-07-21T12:00:00.000Z"
+      });
+      const ids = [
+        "20000000-0000-4000-8000-000000000001",
+        "40000000-0000-4000-8000-000000000001",
+        "30000000-0000-4000-8000-000000000001"
+      ];
+      let idCalls = 0;
+      const rooms = createRoomService({
+        repositories,
+        eventStore: createEventStore(database, repositories),
+        idempotencyStore: createIdempotencyStore(database, () => "2026-07-21T12:00:00.000Z"),
+        clock: { now: () => "2026-07-21T12:00:00.000Z" },
+        ids: { next: () => {
+          idCalls += 1;
+          return ids.shift() ?? (() => { throw new Error("ID exhausted"); })();
+        } }
+      });
+      const roomMetadata = {
+        idempotencyKey: "room-replay",
+        requestType: "room.create",
+        requestHash: "room-replay-hash",
+        workerGeneration: "50000000-0000-4000-8000-000000000001"
+      };
+      const firstRoom = rooms.createRoom({ projectId: project.id, title: "Persisted" }, roomMetadata);
+      const messageMetadata = {
+        idempotencyKey: "message-replay",
+        requestType: "message.post",
+        requestHash: "message-replay-hash",
+        workerGeneration: "50000000-0000-4000-8000-000000000001"
+      };
+      const firstMessage = rooms.postUserMessage({ roomId: firstRoom.value.id, body: "Persisted" }, messageMetadata);
+
+      database.prepare("DELETE FROM projects WHERE id = ?").run(project.id);
+
+      expect(rooms.createRoom({ projectId: project.id, title: " " }, roomMetadata)).toEqual({
+        value: firstRoom.value,
+        replayed: true
+      });
+      expect(rooms.postUserMessage({ roomId: firstRoom.value.id, body: " " }, messageMetadata)).toEqual({
+        value: firstMessage.value,
+        replayed: true
+      });
+      expect(() => rooms.createRoom(
+        { projectId: project.id, title: " " },
+        { ...roomMetadata, requestHash: "changed-room-hash" }
+      )).toThrow(IdempotencyConflictError);
+      expect(() => rooms.postUserMessage(
+        { roomId: firstRoom.value.id, body: " " },
+        { ...messageMetadata, requestHash: "changed-message-hash" }
+      )).toThrow(IdempotencyConflictError);
+      expect(idCalls).toBe(3);
     } finally {
       database.close();
     }

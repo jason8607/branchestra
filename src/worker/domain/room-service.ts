@@ -34,11 +34,13 @@ export interface RoomService {
 export function createRoomService(dependencies: RoomServiceDependencies): RoomService {
   return {
     createRoom(input, metadata) {
+      const replayed = dependencies.idempotencyStore.replay(metadata, RoomSchema);
+      if (replayed) return replayed;
       const validatedInput = RoomSchema.pick({ projectId: true, title: true }).parse(input);
-      if (!dependencies.repositories.projects.findById(validatedInput.projectId)) {
-        throw new Error(`Project not found: ${validatedInput.projectId}`);
-      }
       return dependencies.idempotencyStore.execute(metadata, RoomSchema, () => {
+        if (!dependencies.repositories.projects.findById(validatedInput.projectId)) {
+          throw new Error(`Project not found: ${validatedInput.projectId}`);
+        }
         return dependencies.repositories.rooms.insert(RoomSchema.parse({
           id: dependencies.ids.next(),
           projectId: validatedInput.projectId,
@@ -48,11 +50,13 @@ export function createRoomService(dependencies: RoomServiceDependencies): RoomSe
       });
     },
     postUserMessage(input, metadata) {
+      const replayed = dependencies.idempotencyStore.replay(metadata, RoomEventSchema);
+      if (replayed) return replayed;
       const validatedInput = UserMessageSchema.pick({ roomId: true, body: true }).parse(input);
-      if (!dependencies.repositories.rooms.findById(validatedInput.roomId)) {
-        throw new Error(`Room not found: ${validatedInput.roomId}`);
-      }
       return dependencies.idempotencyStore.execute(metadata, RoomEventSchema, () => {
+        if (!dependencies.repositories.rooms.findById(validatedInput.roomId)) {
+          throw new Error(`Room not found: ${validatedInput.roomId}`);
+        }
         const createdAt = dependencies.clock.now();
         const messageId = dependencies.ids.next();
         return dependencies.eventStore.append({
