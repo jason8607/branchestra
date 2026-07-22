@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { app, BrowserWindow } from "electron";
+import { app, BrowserWindow, ipcMain } from "electron";
+import { createElectronProjectDialog } from "./dialog/project-dialog";
+import { registerRendererGateway } from "./ipc/renderer-gateway";
 import { installApplicationLifecycle } from "./lifecycle";
 import { createWindowOptions } from "./window-options";
 import { createWorkerSupervisor } from "./worker/supervisor";
@@ -43,10 +45,18 @@ export function bootstrapMain(): void {
   const createWindow = async (): Promise<BrowserWindow> => {
     const created = new BrowserWindow(createWindowOptions(paths.preloadEntry));
     window = created;
+    const disposeGateway = registerRendererGateway({
+      ipcMain,
+      trustedWebContents: created.webContents,
+      parentWindow: created,
+      dialog: createElectronProjectDialog(),
+      supervisor
+    });
     created.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
     created.webContents.on("will-navigate", (event) => event.preventDefault());
     created.once("ready-to-show", () => created.show());
     created.once("closed", () => {
+      disposeGateway();
       if (window === created) window = null;
     });
     const developmentUrl = process.env.ELECTRON_RENDERER_URL;
