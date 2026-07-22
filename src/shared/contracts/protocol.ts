@@ -5,7 +5,8 @@ import {
   RoomEventCursorSchema,
   RoomEventPageSchema,
   RoomEventSchema,
-  RoomSchema
+  RoomSchema,
+  SnapshotPageSchema
 } from "./domain";
 
 export const PROTOCOL_VERSION = 1 as const;
@@ -21,11 +22,16 @@ const base = {
   workerGeneration: GenerationSchema
 };
 const empty = z.object({}).strict();
+const snapshotPageRequest = z.object({
+  snapshotId: UuidSchema,
+  cursor: z.number().int().nonnegative()
+}).strict();
+const snapshotRequest = z.union([empty, snapshotPageRequest]);
 const roomCreate = z.object({ projectId: UuidSchema, title: z.string().trim().min(1).max(120) }).strict();
 const messagePost = z.object({ roomId: UuidSchema, body: z.string().trim().min(1).max(20_000) }).strict();
 
 export const RendererRequestEnvelopeSchema = z.discriminatedUnion("type", [
-  z.object({ ...base, workerGeneration: z.union([GenerationSchema, z.literal(ZERO_WORKER_GENERATION)]), type: z.literal("state.getSnapshot"), payload: empty }).strict(),
+  z.object({ ...base, workerGeneration: z.union([GenerationSchema, z.literal(ZERO_WORKER_GENERATION)]), type: z.literal("state.getSnapshot"), payload: snapshotRequest }).strict(),
   z.object({ ...base, type: z.literal("room.replay"), payload: RoomEventCursorSchema }).strict(),
   z.object({ ...base, type: z.literal("project.pickExisting"), payload: empty }).strict(),
   z.object({ ...base, type: z.literal("room.create"), payload: roomCreate }).strict(),
@@ -33,7 +39,7 @@ export const RendererRequestEnvelopeSchema = z.discriminatedUnion("type", [
 ]);
 
 export const WorkerRequestEnvelopeSchema = z.discriminatedUnion("type", [
-  z.object({ ...base, type: z.literal("state.getSnapshot"), payload: empty }).strict(),
+  z.object({ ...base, type: z.literal("state.getSnapshot"), payload: snapshotRequest }).strict(),
   z.object({ ...base, type: z.literal("room.replay"), payload: RoomEventCursorSchema }).strict(),
   z.object({ ...base, type: z.literal("project.addExisting"), payload: z.object({ selectedPath: z.string().min(1) }).strict() }).strict(),
   z.object({ ...base, type: z.literal("room.create"), payload: roomCreate }).strict(),
@@ -41,7 +47,7 @@ export const WorkerRequestEnvelopeSchema = z.discriminatedUnion("type", [
   z.object({ ...base, type: z.literal("worker.prepareQuit"), payload: z.object({ deadlineMs: z.number().int().positive() }).strict() }).strict()
 ]);
 
-const responseData = z.union([AppSnapshotSchema, RoomEventPageSchema, ProjectSchema, RoomSchema, RoomEventSchema, z.object({ cancelled: z.literal(true) }).strict(), z.object({ prepared: z.literal(true) }).strict()]);
+const responseData = z.union([AppSnapshotSchema, SnapshotPageSchema, RoomEventPageSchema, ProjectSchema, RoomSchema, RoomEventSchema, z.object({ cancelled: z.literal(true) }).strict(), z.object({ prepared: z.literal(true) }).strict()]);
 export const WorkerResponseEnvelopeSchema = z.object({
   ...base,
   type: z.literal("response"),
@@ -77,4 +83,18 @@ export type WorkerResponsePayload = WorkerResponseEnvelope["payload"];
 export function assertEnvelopeSize(value: unknown): void {
   const size = new TextEncoder().encode(JSON.stringify(value)).byteLength;
   if (size > MAX_IPC_BYTES) throw new Error(`IPC envelope exceeds ${MAX_IPC_BYTES} bytes`);
+}
+
+export function encodedEnvelopeBytes(value: unknown): number {
+  return new TextEncoder().encode(JSON.stringify(value)).byteLength;
+}
+
+export function parseEnvelope<T>(schema: z.ZodType<T>, value: unknown): T {
+  assertEnvelopeSize(value);
+  return schema.parse(value);
+}
+
+export function postEnvelope(post: (value: unknown) => void, value: unknown): void {
+  assertEnvelopeSize(value);
+  post(value);
 }

@@ -248,6 +248,34 @@ function timelineApiFixture(options: {
 }
 
 describe("timeline store", () => {
+  it("atomically assembles a deterministic multi-page snapshot before publishing state", async () => {
+    const snapshotId = "90000000-0000-4000-8000-000000000001";
+    const commands: RendererCommand[] = [];
+    const api: BranchestraApi = {
+      async request(command) {
+        commands.push(command);
+        if (command.type === "room.replay") return successResponse(command, eventPage([], false));
+        const page = commands.length === 1
+          ? { snapshotId, projects: [project()], rooms: [], roomCursors: {}, nextCursor: 1, hasMore: true }
+          : { snapshotId, projects: [], rooms: [room()], roomCursors: { [ROOM_ID]: 0 }, nextCursor: 3, hasMore: false };
+        return successResponse(command, page);
+      },
+      subscribe: () => () => undefined
+    };
+    const store = createTimelineStore(api, sequentialIds());
+    const published: AppSnapshot[] = [];
+    store.subscribe(() => published.push(store.getState().snapshot));
+
+    await store.hydrate();
+
+    expect(commands).toHaveLength(3); // two snapshot pages plus selected-room replay
+    expect(commands[1]).toMatchObject({
+      type: "state.getSnapshot",
+      payload: { snapshotId, cursor: 1 }
+    });
+    expect(store.getState().snapshot).toEqual(foundationSnapshot(0));
+    expect(published.some((snapshot) => snapshot.projects.length === 1 && snapshot.rooms.length === 0)).toBe(false);
+  });
   it("hydrates from snapshot, replays by cursor, ignores duplicates, and fills a gap", async () => {
     const fixture = timelineApiFixture({
       snapshot: foundationSnapshot(3),
@@ -453,6 +481,39 @@ describe("timeline store", () => {
       selectedProjectId: PROJECT_ID,
       selectedRoomId: createdRoom.id
     });
+  });
+
+  it("rejects a current-generation room creation failure while preserving safe error state", async () => {
+    const fixture = apiHarness((command) => {
+      if (command.type === "state.getSnapshot") return successResponse(command, foundationSnapshot(0));
+      if (command.type === "room.replay") return successResponse(command, eventPage([], false));
+      if (command.type === "room.create") return failureResponse(command, "Room could not be created");
+      throw new Error(`Unexpected command: ${command.type}`);
+    });
+    const store = createTimelineStore(fixture.api, sequentialIds());
+    await store.hydrate();
+
+    await expect(store.createRoom(PROJECT_ID, "Room")).rejects.toThrow("Room could not be created");
+    expect(store.getState()).toMatchObject({ connection: "error", error: "Room could not be created" });
+  });
+
+  it("rejects room creation interrupted by a worker generation change without clobbering reconnecting state", async () => {
+    const mutation = deferred<WorkerResponseEnvelope>();
+    const fixture = apiHarness((command) => {
+      if (command.type === "state.getSnapshot") return successResponse(command, foundationSnapshot(0));
+      if (command.type === "room.replay") return successResponse(command, eventPage([], false));
+      if (command.type === "room.create") return mutation.promise;
+      throw new Error(`Unexpected command: ${command.type}`);
+    });
+    const store = createTimelineStore(fixture.api, sequentialIds());
+    await store.hydrate();
+    const creating = store.createRoom(PROJECT_ID, "Room");
+    await Promise.resolve();
+    fixture.emit(workerEvent("worker.disconnected", GENERATION));
+    mutation.reject(new Error("worker gone"));
+
+    await expect(creating).rejects.toThrow("Room creation was interrupted. Try again.");
+    expect(store.getState()).toMatchObject({ connection: "reconnecting", error: null });
   });
 
   it("posts one trimmed message and suppresses its later live duplicate", async () => {

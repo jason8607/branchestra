@@ -9,6 +9,7 @@ import {
 } from "./dialog/project-dialog";
 import { registerRendererGateway } from "./ipc/renderer-gateway";
 import { installApplicationLifecycle } from "./lifecycle";
+import { resolveRendererLocation } from "./renderer-location";
 import { createWindowOptions } from "./window-options";
 import { createWorkerSupervisor } from "./worker/supervisor";
 import { electronUtilityProcessAdapter } from "./worker/utility-process-adapter";
@@ -84,25 +85,43 @@ export function bootstrapMain(): void {
   let window: BrowserWindow | null = null;
 
   const createWindow = async (): Promise<BrowserWindow> => {
+    const rendererLocation = resolveRendererLocation({
+      isPackaged: app.isPackaged,
+      rendererEntry: paths.rendererEntry,
+      developmentUrl: process.env.ELECTRON_RENDERER_URL
+    });
     const created = new BrowserWindow(createWindowOptions(paths.preloadEntry));
     window = created;
     const disposeGateway = registerRendererGateway({
       ipcMain,
       trustedWebContents: created.webContents,
+      trustedRendererUrl: rendererLocation.url,
       parentWindow: created,
       dialog: projectDialog,
       supervisor
     });
+    let gatewayDisposed = false;
+    const disposeWindowGateway = (): void => {
+      if (gatewayDisposed) return;
+      gatewayDisposed = true;
+      disposeGateway();
+    };
     created.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
     created.webContents.on("will-navigate", (event) => event.preventDefault());
     created.once("ready-to-show", () => created.show());
     created.once("closed", () => {
-      disposeGateway();
+      disposeWindowGateway();
       if (window === created) window = null;
     });
-    const developmentUrl = process.env.ELECTRON_RENDERER_URL;
-    if (developmentUrl !== undefined) await created.loadURL(developmentUrl);
-    else await created.loadFile(paths.rendererEntry);
+    try {
+      if (rendererLocation.kind === "url") await created.loadURL(rendererLocation.url);
+      else await created.loadFile(paths.rendererEntry);
+    } catch (error) {
+      disposeWindowGateway();
+      if (!created.isDestroyed()) created.destroy();
+      if (window === created) window = null;
+      throw error;
+    }
     return created;
   };
 

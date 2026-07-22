@@ -6,6 +6,7 @@ import {
   WorkerResponseEnvelopeSchema,
   ZERO_WORKER_GENERATION,
   assertEnvelopeSize,
+  parseEnvelope,
   type WorkerRequestEnvelope
 } from "../../shared/contracts/protocol";
 import type { ProjectDialogAdapter } from "../dialog/project-dialog";
@@ -14,7 +15,7 @@ import type { WorkerSupervisor } from "../worker/supervisor";
 interface IpcMainAdapter {
   handle(
     channel: string,
-    listener: (event: { sender: { id: number } }, raw: unknown) => Promise<unknown>
+    listener: (event: { sender: { id: number }; senderFrame: { url: string } | null }, raw: unknown) => Promise<unknown>
   ): void;
   removeHandler(channel: string): void;
 }
@@ -22,6 +23,7 @@ interface IpcMainAdapter {
 export interface RendererGatewayDependencies {
   ipcMain: IpcMainAdapter;
   trustedWebContents: Pick<WebContents, "id" | "send">;
+  trustedRendererUrl: string;
   parentWindow: BrowserWindow;
   dialog: ProjectDialogAdapter;
   supervisor: Pick<WorkerSupervisor, "request" | "subscribe" | "getGeneration">;
@@ -32,9 +34,12 @@ export function registerRendererGateway(dependencies: RendererGatewayDependencie
     if (event.sender.id !== dependencies.trustedWebContents.id) {
       throw new Error("Untrusted renderer sender");
     }
+    if (event.senderFrame?.url !== dependencies.trustedRendererUrl) {
+      throw new Error("Untrusted renderer frame");
+    }
 
     assertEnvelopeSize(raw);
-    const request = RendererRequestEnvelopeSchema.parse(raw);
+    const request = parseEnvelope(RendererRequestEnvelopeSchema, raw);
     const activeGeneration = dependencies.supervisor.getGeneration();
     if (activeGeneration === null) throw new Error("Worker is not ready");
     const isBootstrapSnapshot = request.type === "state.getSnapshot"
@@ -52,7 +57,7 @@ export function registerRendererGateway(dependencies: RendererGatewayDependencie
           throw new Error("Worker generation changed while project dialog was open");
         }
         if (selectedPath === null) {
-          return WorkerResponseEnvelopeSchema.parse({
+          const cancelled = WorkerResponseEnvelopeSchema.parse({
             v: request.v,
             requestId: request.requestId,
             idempotencyKey: request.idempotencyKey,
@@ -65,6 +70,8 @@ export function registerRendererGateway(dependencies: RendererGatewayDependencie
               replayed: false
             }
           });
+          assertEnvelopeSize(cancelled);
+          return cancelled;
         }
         workerRequest = WorkerRequestEnvelopeSchema.parse({
           ...request,
@@ -84,7 +91,7 @@ export function registerRendererGateway(dependencies: RendererGatewayDependencie
         });
         break;
     }
-    const workerResponse = WorkerResponseEnvelopeSchema.parse(
+    const workerResponse = parseEnvelope(WorkerResponseEnvelopeSchema,
       await dependencies.supervisor.request(workerRequest)
     );
     if (
@@ -96,18 +103,26 @@ export function registerRendererGateway(dependencies: RendererGatewayDependencie
       throw new Error("Worker response correlation mismatch");
     }
     if (request.type !== "project.pickExisting") return workerResponse;
-    return WorkerResponseEnvelopeSchema.parse({
+    const rewritten = WorkerResponseEnvelopeSchema.parse({
       ...workerResponse,
       payload: {
         ...workerResponse.payload,
         requestType: "project.pickExisting"
       }
     });
+    assertEnvelopeSize(rewritten);
+    return rewritten;
   });
 
   const unsubscribe = dependencies.supervisor.subscribe((raw) => {
+    try {
+      assertEnvelopeSize(raw);
+    } catch {
+      return;
+    }
     const parsed = WorkerEventEnvelopeSchema.safeParse(raw);
     if (parsed.success) {
+      assertEnvelopeSize(parsed.data);
       dependencies.trustedWebContents.send("branchestra:event", parsed.data);
     }
   });

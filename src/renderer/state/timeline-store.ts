@@ -4,6 +4,7 @@ import {
   RoomEventPageSchema,
   RoomEventSchema,
   RoomSchema,
+  SnapshotPageSchema,
   type AppSnapshot,
   type RoomEvent
 } from "../../shared/contracts/domain";
@@ -31,6 +32,7 @@ export interface TimelineStore {
 
 const EMPTY_SNAPSHOT: AppSnapshot = { projects: [], rooms: [], roomCursors: {} };
 const POST_INTERRUPTED_MESSAGE = "Message delivery was interrupted. Try again.";
+const CREATE_ROOM_INTERRUPTED_MESSAGE = "Room creation was interrupted. Try again.";
 Object.freeze(EMPTY_SNAPSHOT.projects);
 Object.freeze(EMPTY_SNAPSHOT.rooms);
 Object.freeze(EMPTY_SNAPSHOT.roomCursors);
@@ -268,7 +270,7 @@ export function createTimelineStore(
       error: null
     });
     try {
-      const response = await api.request({
+      let response = await api.request({
         type: "state.getSnapshot",
         payload: {},
         idempotencyKey: nextId()
@@ -279,7 +281,46 @@ export function createTimelineStore(
         workerGeneration = response.workerGeneration;
         workerReady = true;
       }
-      const parsedSnapshot = AppSnapshotSchema.safeParse(response.payload.data);
+      let parsedSnapshot = AppSnapshotSchema.safeParse(response.payload.data);
+      if (!parsedSnapshot.success) {
+        const accumulated: AppSnapshot = { projects: [], rooms: [], roomCursors: {} };
+        let expectedSnapshotId: string | null = null;
+        let cursor = 0;
+        while (true) {
+          const parsedPage = SnapshotPageSchema.safeParse(response.payload.data);
+          if (!parsedPage.success) throw new Error("Unable to load application state");
+          const page = parsedPage.data;
+          if (expectedSnapshotId !== null && page.snapshotId !== expectedSnapshotId) {
+            throw new Error("Snapshot generation changed during pagination");
+          }
+          if (page.nextCursor < cursor || (page.hasMore && page.nextCursor === cursor)) {
+            throw new Error("Snapshot pagination did not advance");
+          }
+          expectedSnapshotId = page.snapshotId;
+          for (const project of page.projects) {
+            if (accumulated.projects.some((item) => item.id === project.id)) throw new Error("Snapshot contains a duplicate project");
+            accumulated.projects.push(project);
+          }
+          for (const room of page.rooms) {
+            if (accumulated.rooms.some((item) => item.id === room.id)) throw new Error("Snapshot contains a duplicate room");
+            accumulated.rooms.push(room);
+          }
+          for (const [roomId, roomSeq] of Object.entries(page.roomCursors)) {
+            if (roomId in accumulated.roomCursors) throw new Error("Snapshot contains a duplicate room cursor");
+            accumulated.roomCursors[roomId] = roomSeq;
+          }
+          cursor = page.nextCursor;
+          if (!page.hasMore) break;
+          response = await api.request({
+            type: "state.getSnapshot",
+            payload: { snapshotId: page.snapshotId, cursor },
+            idempotencyKey: nextId()
+          });
+          if (!isCurrent(epoch)) return;
+          if (!response.payload.ok) throw new Error(response.payload.message);
+        }
+        parsedSnapshot = AppSnapshotSchema.safeParse(accumulated);
+      }
       if (!parsedSnapshot.success) throw new Error("Unable to load application state");
       const snapshot = immutableSnapshot(parsedSnapshot.data);
       const retainedRoom = snapshot.rooms.find((candidate) => candidate.id === state.selectedRoomId);
@@ -445,13 +486,9 @@ export function createTimelineStore(
           payload: { projectId, title: trimmedTitle },
           idempotencyKey: nextId()
         });
-        if (!isCurrent(operationEpoch)) return;
+        if (!isCurrent(operationEpoch)) throw new Error(CREATE_ROOM_INTERRUPTED_MESSAGE);
         if (!response.payload.ok) {
-          patchStatus(operationEpoch, statusOperation, {
-            connection: "error",
-            error: response.payload.message
-          });
-          return;
+          throw new Error(response.payload.message);
         }
         if (response.payload.requestType !== "room.create") {
           throw new Error("Unexpected room creation response");
@@ -459,15 +496,21 @@ export function createTimelineStore(
         const parsedRoom = RoomSchema.safeParse(response.payload.data);
         if (!parsedRoom.success) throw new Error("Unable to create room");
         const createdRoom = parsedRoom.data;
-        if (!isCurrent(operationEpoch)) return;
+        if (!isCurrent(operationEpoch)) throw new Error(CREATE_ROOM_INTERRUPTED_MESSAGE);
         await forceFreshHydrate(operationEpoch);
-        if (!isCurrent(operationEpoch) || state.connection === "error") return;
+        if (!isCurrent(operationEpoch)) throw new Error(CREATE_ROOM_INTERRUPTED_MESSAGE);
+        if (state.connection === "error") throw new Error(state.error ?? "Unable to refresh rooms");
         await selectRoom(createdRoom.id);
       } catch (error) {
+        if (!isCurrent(operationEpoch)) {
+          throw new Error(CREATE_ROOM_INTERRUPTED_MESSAGE, { cause: error });
+        }
+        const message = error instanceof Error ? error.message : "Unable to create room";
         patchStatus(operationEpoch, statusOperation, {
           connection: "error",
-          error: error instanceof Error ? error.message : "Unable to create room"
+          error: message
         });
+        throw new Error(message, { cause: error });
       }
     },
     async postMessage(roomId, body) {

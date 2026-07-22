@@ -197,7 +197,8 @@ describe("renderer shell", () => {
 
   it("controls the room title and creates a room with the entered title", async () => {
     const user = userEvent.setup();
-    const onCreateRoom = vi.fn();
+    const pending = deferred();
+    const onCreateRoom = vi.fn(() => pending.promise);
     render(
       <ProjectRail
         state={timelineState()}
@@ -217,7 +218,26 @@ describe("renderer shell", () => {
     await user.click(submit);
 
     expect(onCreateRoom).toHaveBeenCalledWith(PROJECT_ID, "Roadmap");
+    expect((input as HTMLInputElement).value).toBe("Roadmap");
+    expect((submit as HTMLButtonElement).disabled).toBe(true);
+    await act(async () => pending.resolve());
     expect((input as HTMLInputElement).value).toBe("");
+  });
+
+  it("retains a room draft and gives accessible guidance when creation rejects", async () => {
+    const user = userEvent.setup();
+    const pending = deferred();
+    const onCreateRoom = vi.fn(() => pending.promise);
+    render(<ProjectRail state={timelineState()} onAddProject={vi.fn()} onSelectRoom={vi.fn()} onCreateRoom={onCreateRoom} />);
+    const input = screen.getByTestId("room-title-input") as HTMLInputElement;
+    const submit = screen.getByTestId("create-room") as HTMLButtonElement;
+    await user.type(input, "Keep this room");
+    await user.click(submit);
+    await user.click(submit);
+    expect(onCreateRoom).toHaveBeenCalledOnce();
+    await act(async () => pending.reject(new Error("offline")));
+    expect(input.value).toBe("Keep this room");
+    expect(screen.getByRole("alert").textContent).toContain("not created");
   });
 
   it("exposes the create-room form for a selected empty project", () => {

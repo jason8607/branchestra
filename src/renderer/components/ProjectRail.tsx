@@ -5,9 +5,11 @@ export function ProjectRail(props: {
   state: TimelineState;
   onAddProject(): void;
   onSelectRoom(roomId: string): void;
-  onCreateRoom(projectId: string, title: string): void;
+  onCreateRoom(projectId: string, title: string): Promise<void>;
 }): React.JSX.Element {
   const [roomTitle, setRoomTitle] = useState("");
+  const [creatingRoom, setCreatingRoom] = useState(false);
+  const [creationError, setCreationError] = useState<string | null>(null);
 
   return (
     <nav className="project-rail" data-testid="project-rail" aria-label="Project and room navigation">
@@ -45,9 +47,16 @@ export function ProjectRail(props: {
               className="room-form"
               onSubmit={(event) => {
                 event.preventDefault();
-                if (roomTitle.trim().length === 0) return;
-                props.onCreateRoom(project.id, roomTitle);
-                setRoomTitle("");
+                const submittedTitle = roomTitle.trim();
+                if (submittedTitle.length === 0 || creatingRoom) return;
+                setCreatingRoom(true);
+                setCreationError(null);
+                void props.onCreateRoom(project.id, submittedTitle)
+                  .then(() => setRoomTitle((current) => (
+                    current.trim() === submittedTitle ? "" : current
+                  )))
+                  .catch(() => setCreationError("Room was not created. Check the connection and try again."))
+                  .finally(() => setCreatingRoom(false));
               }}
             >
               <label htmlFor={`room-title-${project.id}`}>New room title</label>
@@ -57,14 +66,18 @@ export function ProjectRail(props: {
                 value={roomTitle}
                 onChange={(event) => setRoomTitle(event.currentTarget.value)}
                 placeholder="Room name"
+                aria-describedby={creationError ? `room-creation-error-${project.id}` : undefined}
               />
               <button
                 type="submit"
                 data-testid="create-room"
-                disabled={roomTitle.trim().length === 0}
+                disabled={creatingRoom || roomTitle.trim().length === 0}
               >
-                Create room
+                {creatingRoom ? "Creating…" : "Create room"}
               </button>
+              {creationError ? (
+                <p id={`room-creation-error-${project.id}`} role="alert">{creationError}</p>
+              ) : null}
             </form> : null}
           </section>
         );

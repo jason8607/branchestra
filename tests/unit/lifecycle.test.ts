@@ -158,6 +158,23 @@ describe("application lifecycle", () => {
 
     expect(reportError).toHaveBeenCalledWith(failure);
     expect(fixture.createWindow).not.toHaveBeenCalled();
+    expect(fixture.supervisor.stop).toHaveBeenCalledOnce();
+    await fixture.finishStop();
+    expect(fixture.app.quit).toHaveBeenCalledOnce();
+  });
+
+  it("rolls back a ready worker when window creation fails", async () => {
+    const fixture = lifecycleFixture({ lock: true });
+    const failure = new Error("window load failed");
+    fixture.createWindow.mockRejectedValueOnce(failure);
+    installApplicationLifecycle(fixture.dependencies);
+
+    await fixture.emitReady();
+
+    await vi.waitFor(() => expect(fixture.reportError).toHaveBeenCalledWith(failure));
+    expect(fixture.supervisor.stop).toHaveBeenCalledOnce();
+    await fixture.finishStop();
+    expect(fixture.app.quit).toHaveBeenCalledOnce();
   });
 
   it("reports stop rejection and still performs the final quit", async () => {

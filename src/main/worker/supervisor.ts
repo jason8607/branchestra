@@ -4,6 +4,7 @@ import {
   WorkerEventEnvelopeSchema,
   WorkerRequestEnvelopeSchema,
   WorkerResponseEnvelopeSchema,
+  assertEnvelopeSize,
   type WorkerEventEnvelope,
   type WorkerRequestEnvelope,
   type WorkerResponseEnvelope
@@ -78,16 +79,17 @@ export function createWorkerSupervisor(dependencies: WorkerSupervisorDependencie
     target.unsubscribeExit = () => undefined;
   };
 
-  const scheduleReplacement = (): void => {
-    if (state === "stopping" || state === "stopped" || cancelRestart !== null) return;
+  const scheduleReplacement = (): boolean => {
+    if (state === "stopping" || state === "stopped" || cancelRestart !== null) return false;
     const lastIndex = dependencies.restartBackoffMs.length - 1;
     const delayMs = dependencies.restartBackoffMs[Math.min(restartIndex, lastIndex)];
-    if (delayMs === undefined) return;
+    if (delayMs === undefined) return false;
     restartIndex = Math.min(restartIndex + 1, lastIndex);
     cancelRestart = dependencies.schedule(delayMs, () => {
       cancelRestart = null;
       if (state !== "stopping" && state !== "stopped") spawn();
     });
+    return true;
   };
 
   const fail = (
@@ -124,8 +126,11 @@ export function createWorkerSupervisor(dependencies: WorkerSupervisorDependencie
 
   const spawn = (): void => {
     if (state === "stopping" || state === "stopped") return;
-    generation = dependencies.nextGeneration();
-    const expectedGeneration = generation;
+    let expectedGeneration: string;
+    let childProcess: UtilityProcessChild;
+    try {
+      expectedGeneration = dependencies.nextGeneration();
+      generation = expectedGeneration;
     const environment = dependencies.environment ?? process.env;
     const env: Record<string, string> = {
       PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
@@ -138,7 +143,18 @@ export function createWorkerSupervisor(dependencies: WorkerSupervisorDependencie
       const value = environment[name];
       if (value !== undefined) env[name] = value;
     }
-    const childProcess = dependencies.utilityProcess.fork(dependencies.workerEntry, { env });
+      childProcess = dependencies.utilityProcess.fork(dependencies.workerEntry, { env });
+    } catch (error) {
+      active = null;
+      generation = null;
+      state = "starting";
+      if (!scheduleReplacement()) {
+        rejectStart?.(error instanceof Error ? error : new Error("Failed to fork worker"));
+        resolveStart = null;
+        rejectStart = null;
+      }
+      return;
+    }
     const target: ActiveChild = {
       process: childProcess,
       generation: expectedGeneration,
@@ -156,6 +172,12 @@ export function createWorkerSupervisor(dependencies: WorkerSupervisorDependencie
     );
     target.unsubscribeMessage = childProcess.onMessage((value) => {
       if (active !== target) return;
+      try {
+        assertEnvelopeSize(value);
+      } catch {
+        fail(target, "oversized-envelope", true);
+        return;
+      }
       const parsedResponse = WorkerResponseEnvelopeSchema.safeParse(value);
       if (parsedResponse.success && parsedResponse.data.workerGeneration === expectedGeneration) {
         const correlation = pending.get(parsedResponse.data.requestId);
@@ -213,12 +235,18 @@ export function createWorkerSupervisor(dependencies: WorkerSupervisorDependencie
       }
       const parsed = WorkerRequestEnvelopeSchema.safeParse(request);
       if (!parsed.success) return Promise.reject(new Error("Worker request is invalid"));
+      try {
+        assertEnvelopeSize(parsed.data);
+      } catch (error) {
+        return Promise.reject(error);
+      }
       if (pending.has(parsed.data.requestId)) {
         return Promise.reject(new Error(`Duplicate in-flight requestId: ${parsed.data.requestId}`));
       }
       return new Promise((resolve, reject) => {
         pending.set(parsed.data.requestId, { resolve, reject });
         try {
+          assertEnvelopeSize(parsed.data);
           active!.process.postMessage(parsed.data);
         } catch (error) {
           pending.delete(parsed.data.requestId);
@@ -274,6 +302,7 @@ export function createWorkerSupervisor(dependencies: WorkerSupervisorDependencie
         });
         let posted = true;
         try {
+          assertEnvelopeSize(request);
           target.process.postMessage(request);
         } catch {
           posted = false;

@@ -5,6 +5,8 @@ import { IdempotencyConflictError } from "../../src/worker/storage/idempotency-s
 import type { CommandHandler } from "../../src/worker/protocol/command-handler";
 import { createCommandHandlers } from "../../src/worker/protocol/handlers";
 import { createWorkerRouter } from "../../src/worker/protocol/worker-router";
+import { SnapshotPageSchema } from "../../src/shared/contracts/domain";
+import { assertEnvelopeSize } from "../../src/shared/contracts/protocol";
 
 const activeGeneration = "50000000-0000-4000-8000-000000000001";
 const request = {
@@ -104,6 +106,40 @@ describe("worker router", () => {
     const response = await route(request);
     expect(handler.handle).toHaveBeenCalledWith({ type: request.type, payload: request.payload }, expect.objectContaining({ requestId: request.requestId, idempotencyKey: request.idempotencyKey, workerGeneration: activeGeneration }));
     expect(response).toMatchObject({ v: 1, requestId: request.requestId, idempotencyKey: request.idempotencyKey, workerGeneration: activeGeneration, type: "response", payload: { ok: true, requestType: "state.getSnapshot", replayed: false } });
+  });
+
+  it("serves a large snapshot in bounded pages and rejects a skipped session cursor", async () => {
+    const project = { id: "10000000-0000-4000-8000-000000000001", repositoryRoot: "/repo", gitCommonDir: "/repo/.git", displayName: "repo", headOid: "a".repeat(40), defaultBranch: "main", createdAt: "2026-07-21T12:00:00.000Z" };
+    const rooms = Array.from({ length: 600 }, (_, index) => ({
+      id: `20000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+      projectId: project.id,
+      title: `Room ${index} ${"x".repeat(100)}`,
+      createdAt: "2026-07-21T12:00:00.000Z"
+    }));
+    const handlers = createCommandHandlers({
+      projectService: { addExistingProject: async () => ({ value: project, replayed: false }) },
+      roomService: {
+        createRoom: () => ({ value: rooms[0]!, replayed: false }),
+        postUserMessage: vi.fn(),
+        getSnapshot: () => ({ projects: [project], rooms, roomCursors: Object.fromEntries(rooms.map((room) => [room.id, 0])) }),
+        replayRoom: vi.fn()
+      },
+      prepareQuit: async () => undefined
+    });
+    const route = createWorkerRouter({ workerGeneration: activeGeneration, handlers });
+    const first = await route(request);
+    expect(() => assertEnvelopeSize(first)).not.toThrow();
+    if (!first.payload.ok) throw new Error("Expected snapshot page");
+    const page = SnapshotPageSchema.parse(first.payload.data);
+    expect(page.hasMore).toBe(true);
+
+    const skipped = await route({
+      ...request,
+      requestId: "10000000-0000-4000-8000-000000000002",
+      idempotencyKey: "snapshot-skipped",
+      payload: { snapshotId: page.snapshotId, cursor: page.nextCursor + 1 }
+    });
+    expect(skipped.payload).toMatchObject({ ok: false, code: "INTERNAL" });
   });
 
   it.each([

@@ -23,7 +23,7 @@ export function App({ store }: { store: TimelineStore }): React.JSX.Element {
         state={state}
         onAddProject={() => void store.addProject()}
         onSelectRoom={(roomId) => void store.selectRoom(roomId).catch(() => undefined)}
-        onCreateRoom={(projectId, title) => void store.createRoom(projectId, title)}
+        onCreateRoom={(projectId, title) => store.createRoom(projectId, title)}
       />
       <section className="timeline-column">
         <header className="timeline-header">

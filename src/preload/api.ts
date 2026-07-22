@@ -3,7 +3,9 @@ import {
   RendererRequestEnvelopeSchema,
   WorkerEventEnvelopeSchema,
   WorkerResponseEnvelopeSchema,
-  ZERO_WORKER_GENERATION
+  ZERO_WORKER_GENERATION,
+  assertEnvelopeSize,
+  parseEnvelope
 } from "../shared/contracts/protocol";
 
 export interface PreloadTransport {
@@ -29,7 +31,8 @@ export function createPreloadApi(
         type: command.type,
         payload: command.payload
       });
-      const response = WorkerResponseEnvelopeSchema.parse(
+      assertEnvelopeSize(envelope);
+      const response = parseEnvelope(WorkerResponseEnvelopeSchema,
         await transport.invoke("branchestra:request", envelope)
       );
       if (
@@ -56,7 +59,7 @@ export function createPreloadApi(
     },
     subscribe(listener) {
       return transport.on("branchestra:event", (raw) => {
-        const event = WorkerEventEnvelopeSchema.parse(raw);
+        const event = parseEnvelope(WorkerEventEnvelopeSchema, raw);
         generation = event.workerGeneration;
         listener(event);
       });

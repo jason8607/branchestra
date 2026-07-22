@@ -44,6 +44,15 @@ export const AppSnapshotSchema = z.object({
   roomCursors: z.record(UuidSchema, z.number().int().nonnegative())
 }).strict();
 
+export const SnapshotPageSchema = z.object({
+  snapshotId: UuidSchema,
+  projects: z.array(ProjectSchema),
+  rooms: z.array(RoomSchema),
+  roomCursors: z.record(UuidSchema, z.number().int().nonnegative()),
+  nextCursor: z.number().int().nonnegative(),
+  hasMore: z.boolean()
+}).strict();
+
 export const RoomEventCursorSchema = z.object({
   roomId: UuidSchema,
   roomSeq: z.number().int().nonnegative(),
@@ -62,6 +71,7 @@ export type Room = z.infer<typeof RoomSchema>;
 export type UserMessage = z.infer<typeof UserMessageSchema>;
 export type RoomEvent = z.infer<typeof RoomEventSchema>;
 export type AppSnapshot = z.infer<typeof AppSnapshotSchema>;
+export type SnapshotPage = z.infer<typeof SnapshotPageSchema>;
 export type RoomEventCursor = z.infer<typeof RoomEventCursorSchema>;
 export type RoomEventPage = z.infer<typeof RoomEventPageSchema>;
 

@@ -4,6 +4,7 @@ import {
   PROTOCOL_VERSION,
   ZERO_WORKER_GENERATION,
   assertEnvelopeSize,
+  parseEnvelope,
   RendererRequestEnvelopeSchema,
   WorkerRequestEnvelopeSchema
 } from "../../src/shared/contracts/protocol";
@@ -55,5 +56,10 @@ describe("IPC contracts", () => {
       extra: true
     })).toThrow();
     expect(() => assertEnvelopeSize({ body: "x".repeat(MAX_IPC_BYTES) })).toThrow(/65536/);
+  });
+
+  it("enforces the byte boundary before schema parsing in the centralized parser", () => {
+    expect(() => parseEnvelope(RendererRequestEnvelopeSchema, { body: "x".repeat(MAX_IPC_BYTES) }))
+      .toThrow("IPC envelope exceeds");
   });
 });

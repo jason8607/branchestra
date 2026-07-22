@@ -37,10 +37,7 @@ export function installApplicationLifecycle(dependencies: LifecycleDependencies)
   };
   dependencies.app.on("second-instance", () => dependencies.focusWindow());
   dependencies.app.on("window-all-closed", () => dependencies.app.quit());
-  dependencies.app.on("before-quit", (...args) => {
-    if (allowQuit) return;
-    const event = args[0] as PreventableApplicationEvent;
-    event.preventDefault();
+  const requestQuit = (): void => {
     if (quitPromise !== null) return;
     const deadlineMs = Date.now() + dependencies.quitTimeoutMs;
     quitPromise = dependencies.supervisor.stop(deadlineMs)
@@ -49,9 +46,18 @@ export function installApplicationLifecycle(dependencies: LifecycleDependencies)
         allowQuit = true;
         dependencies.app.quit();
       });
+  };
+  dependencies.app.on("before-quit", (...args) => {
+    if (allowQuit) return;
+    const event = args[0] as PreventableApplicationEvent;
+    event.preventDefault();
+    requestQuit();
   });
   void dependencies.app.whenReady().then(async () => {
     await dependencies.supervisor.start();
     await dependencies.createWindow();
-  }).catch(reportError);
+  }).catch((error: unknown) => {
+    reportError(error);
+    requestQuit();
+  });
 }

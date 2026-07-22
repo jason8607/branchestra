@@ -13,6 +13,7 @@ import {
   type DomainRepositories
 } from "../../src/worker/storage/repositories";
 import type { Database } from "../../src/worker/storage/database";
+import { MAX_IPC_BYTES, assertEnvelopeSize } from "../../src/shared/contracts/protocol";
 
 describe("event storage", () => {
   it("throws a dedicated error when appending to a missing room", () => {
@@ -56,6 +57,37 @@ describe("event storage", () => {
       expect([first.roomSeq, second.roomSeq, other.roomSeq]).toEqual([1, 2, 1]);
       expect(events.snapshot().roomCursors).toEqual({ [roomA.id]: 2, [roomB.id]: 1 });
       expect(events.after({ roomId: roomA.id, roomSeq: 1, limit: 50 })).toMatchObject({ events: [{ roomSeq: 2 }], nextRoomSeq: 2, hasMore: false });
+    } finally {
+      database.close();
+    }
+  });
+
+  it("byte-paginates four maximum-size messages into globally bounded response envelopes", () => {
+    const database = openDatabase(":memory:");
+    try {
+      runMigrations(database);
+      const repositories = createRepositories(database);
+      const project = repositories.projects.insert({ id: "10000000-0000-4000-8000-000000000001", repositoryRoot: "/repo", gitCommonDir: "/repo/.git", displayName: "repo", headOid: "a".repeat(40), defaultBranch: "main", createdAt: "2026-07-21T10:00:00.000Z" });
+      const room = repositories.rooms.insert({ id: "20000000-0000-4000-8000-000000000001", projectId: project.id, title: "A", createdAt: "2026-07-21T10:01:00.000Z" });
+      const events = createEventStore(database, repositories);
+      for (let index = 1; index <= 4; index += 1) {
+        const suffix = String(index).padStart(12, "0");
+        events.append({ id: `30000000-0000-4000-8000-${suffix}`, roomId: room.id, type: "message.posted", actor: "user", payload: { id: `40000000-0000-4000-8000-${suffix}`, roomId: room.id, body: "x".repeat(20_000), createdAt: "2026-07-21T10:03:00.000Z" }, createdAt: "2026-07-21T10:03:00.000Z" });
+      }
+      let cursor = 0;
+      const collected: number[] = [];
+      let hasMore = true;
+      while (hasMore) {
+        const page = events.after({ roomId: room.id, roomSeq: cursor, limit: 500 });
+        const envelope = { v: 1, requestId: "10000000-0000-4000-8000-000000000001", idempotencyKey: "replay", workerGeneration: "50000000-0000-4000-8000-000000000001", type: "response", payload: { ok: true, requestType: "room.replay", data: page, replayed: false } };
+        expect(() => assertEnvelopeSize(envelope)).not.toThrow();
+        expect(new TextEncoder().encode(JSON.stringify(envelope)).byteLength).toBeLessThanOrEqual(MAX_IPC_BYTES);
+        expect(page.nextRoomSeq).toBeGreaterThan(cursor);
+        collected.push(...page.events.map((event) => event.roomSeq));
+        cursor = page.nextRoomSeq;
+        hasMore = page.hasMore;
+      }
+      expect(collected).toEqual([1, 2, 3, 4]);
     } finally {
       database.close();
     }

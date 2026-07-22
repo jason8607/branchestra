@@ -6,7 +6,8 @@ import {
   PROTOCOL_VERSION,
   WorkerEventEnvelopeSchema,
   WorkerRequestEnvelopeSchema,
-  WorkerResponseEnvelopeSchema
+  WorkerResponseEnvelopeSchema,
+  postEnvelope
 } from "../shared/contracts/protocol";
 import { createProjectService } from "./domain/project-service";
 import { createRoomService } from "./domain/room-service";
@@ -105,7 +106,7 @@ export async function startWorker(options: WorkerStartOptions): Promise<WorkerRu
   })();
   if (leaseHeld) {
     try {
-      options.port.postMessage(handshakeEnvelope("worker.rejected", options.identity));
+      postEnvelope(options.port.postMessage.bind(options.port), handshakeEnvelope("worker.rejected", options.identity));
     } finally {
       try {
         database.close();
@@ -192,7 +193,7 @@ export async function startWorker(options: WorkerStartOptions): Promise<WorkerRu
             return;
           }
           try {
-            options.port.postMessage(response);
+            postEnvelope(options.port.postMessage.bind(options.port), response);
           } catch {
             stopQuietly();
           }
@@ -201,10 +202,10 @@ export async function startWorker(options: WorkerStartOptions): Promise<WorkerRu
 
         try {
           const response = WorkerResponseEnvelopeSchema.parse(await router(request));
-          options.port.postMessage(response);
+          postEnvelope(options.port.postMessage.bind(options.port), response);
           if (response.payload.ok && response.payload.requestType === "message.post" && !response.payload.replayed) {
             const event = RoomEventSchema.parse(response.payload.data);
-            options.port.postMessage(WorkerEventEnvelopeSchema.parse({
+            postEnvelope(options.port.postMessage.bind(options.port), WorkerEventEnvelopeSchema.parse({
               v: PROTOCOL_VERSION,
               requestId: request.requestId,
               idempotencyKey: event.id,
@@ -237,7 +238,7 @@ export async function startWorker(options: WorkerStartOptions): Promise<WorkerRu
       }
     }, options.heartbeatIntervalMs);
     if (isStopped()) return runtime;
-    options.port.postMessage(handshakeEnvelope("worker.ready", options.identity));
+    postEnvelope(options.port.postMessage.bind(options.port), handshakeEnvelope("worker.ready", options.identity));
     if (lifecycle === "starting") lifecycle = "active";
     return runtime;
   } catch (error) {

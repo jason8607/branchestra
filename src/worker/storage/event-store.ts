@@ -10,6 +10,7 @@ import {
   RoomEventPageSchema,
   RoomEventSchema
 } from "../../shared/contracts/domain";
+import { MAX_IPC_BYTES, encodedEnvelopeBytes } from "../../shared/contracts/protocol";
 import { NotFoundError } from "../domain/errors";
 import type { Database } from "./database";
 import type { DomainRepositories } from "./repositories";
@@ -60,8 +61,7 @@ export function createEventStore(database: Database, repositories: DomainReposit
     },
     after(cursor) {
       const rows = database.prepare("SELECT id, room_id, room_seq, event_type, actor, payload_json, created_at FROM room_events WHERE room_id = ? AND room_seq > ? ORDER BY room_seq LIMIT ?").all(cursor.roomId, cursor.roomSeq, cursor.limit + 1) as Array<{ id: string; room_id: string; room_seq: number; event_type: string; actor: string; payload_json: string; created_at: string }>;
-      const hasMore = rows.length > cursor.limit;
-      const events = rows.slice(0, cursor.limit).map((row) => RoomEventSchema.parse({
+      const available = rows.slice(0, cursor.limit).map((row) => RoomEventSchema.parse({
         id: row.id,
         roomId: row.room_id,
         roomSeq: row.room_seq,
@@ -70,7 +70,23 @@ export function createEventStore(database: Database, repositories: DomainReposit
         payload: JSON.parse(String(row.payload_json)),
         createdAt: row.created_at
       }));
+      const events: RoomEvent[] = [];
+      for (const event of available) {
+        const candidate = [...events, event];
+        const candidatePage = {
+          roomId: cursor.roomId,
+          events: candidate,
+          nextRoomSeq: event.roomSeq,
+          hasMore: true
+        };
+        if (encodedEnvelopeBytes(candidatePage) > MAX_IPC_BYTES - 1_024) break;
+        events.push(event);
+      }
+      const hasMore = events.length < available.length || rows.length > cursor.limit;
       const nextRoomSeq = events.at(-1)?.roomSeq ?? cursor.roomSeq;
+      if (events.length === 0 && available.length > 0) {
+        throw new Error("A single room event exceeds the IPC envelope limit");
+      }
       return RoomEventPageSchema.parse({ roomId: cursor.roomId, events, nextRoomSeq, hasMore });
     }
   };

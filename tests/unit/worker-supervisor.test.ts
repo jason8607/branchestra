@@ -33,7 +33,10 @@ class FakeChild implements UtilityProcessChild {
 class FakeAdapter implements UtilityProcessAdapter {
   readonly children: FakeChild[] = [];
   readonly forks: Array<{ modulePath: string; env: Record<string, string> }> = [];
+  readonly forkErrors: Error[] = [];
   fork(modulePath: string, options: { env: Record<string, string> }): FakeChild {
+    const error = this.forkErrors.shift();
+    if (error) throw error;
     const child = new FakeChild();
     this.children.push(child);
     this.forks.push({ modulePath, env: options.env });
@@ -131,6 +134,56 @@ function rejectedEnvelope(workerGeneration: string): unknown {
 }
 
 describe("worker supervisor", () => {
+  it("contains an initial synchronous fork exception and resolves start after bounded replacement", async () => {
+    const adapter = new FakeAdapter();
+    const scheduler = new FakeScheduler();
+    adapter.forkErrors.push(new Error("fork failed"));
+    const generations = [
+      "50000000-0000-4000-8000-000000000001",
+      "50000000-0000-4000-8000-000000000002"
+    ];
+    const supervisor = createWorkerSupervisor({
+      utilityProcess: adapter,
+      workerEntry: "/app/out/main/worker.js",
+      dbPath: "/data/branchestra.sqlite3",
+      ownerInstanceId,
+      nextGeneration: () => generations.shift()!,
+      restartBackoffMs: [100],
+      schedule: scheduler.schedule
+    });
+
+    const starting = expect(() => supervisor.start()).not.toThrow();
+    void starting;
+    expect(scheduler.activeDelays()).toEqual([100]);
+    scheduler.runNext(100);
+    adapter.children[0]!.emitMessage(readyEnvelope("50000000-0000-4000-8000-000000000002"));
+    await expect(supervisor.start()).resolves.toEqual({
+      workerGeneration: "50000000-0000-4000-8000-000000000002"
+    });
+  });
+
+  it("contains replacement fork exceptions and stop cancels the next retry", async () => {
+    const adapter = new FakeAdapter();
+    const scheduler = new FakeScheduler();
+    const supervisor = createWorkerSupervisor({
+      utilityProcess: adapter,
+      workerEntry: "/app/out/main/worker.js",
+      dbPath: "/data/branchestra.sqlite3",
+      ownerInstanceId,
+      nextGeneration: () => generation,
+      restartBackoffMs: [100],
+      schedule: scheduler.schedule
+    });
+    const starting = supervisor.start();
+    adapter.children[0]!.emitExit(1);
+    adapter.forkErrors.push(new Error("replacement fork failed"));
+
+    expect(() => scheduler.runNext(100)).not.toThrow();
+    expect(scheduler.activeDelays()).toEqual([100]);
+    await supervisor.stop(Date.now() + 1000);
+    await expect(starting).rejects.toThrow(/stopping/i);
+    expect(scheduler.activeDelays()).toEqual([]);
+  });
   it("resolves start only for a schema-valid ready envelope from its generation", async () => {
     const adapter = new FakeAdapter();
     const supervisor = createWorkerSupervisor({

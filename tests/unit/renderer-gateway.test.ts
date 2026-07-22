@@ -121,7 +121,7 @@ function gatewayFixture(options: {
   dialogResult?: Promise<string | null>;
   responseTransform?: (response: WorkerResponseEnvelope) => WorkerResponseEnvelope;
 }) {
-  type Handler = (event: { sender: { id: number } }, raw: unknown) => Promise<unknown>;
+  type Handler = (event: { sender: { id: number }; senderFrame: { url: string } | null }, raw: unknown) => Promise<unknown>;
   const handlers = new Map<string, Handler>();
   const ipcMain = {
     handle: vi.fn((channel: string, handler: Handler) => handlers.set(channel, handler)),
@@ -158,11 +158,18 @@ function gatewayFixture(options: {
     setActiveGeneration(value: string | null): void {
       activeGeneration = value;
     },
-    dependencies: { ipcMain, trustedWebContents, parentWindow, dialog, supervisor },
-    async invoke(senderId: number, raw: unknown): Promise<unknown> {
+    dependencies: {
+      ipcMain,
+      trustedWebContents,
+      trustedRendererUrl: "file:///app/out/renderer/index.html",
+      parentWindow,
+      dialog,
+      supervisor
+    },
+    async invoke(senderId: number, raw: unknown, senderUrl = "file:///app/out/renderer/index.html"): Promise<unknown> {
       const handler = handlers.get("branchestra:request");
       if (!handler) throw new Error("Renderer request handler is not registered");
-      return handler({ sender: { id: senderId } }, raw);
+      return handler({ sender: { id: senderId }, senderFrame: { url: senderUrl } }, raw);
     },
     emitEvent(event: unknown): void {
       eventListener?.(event);
@@ -214,6 +221,17 @@ describe("renderer gateway", () => {
 
     await expect(fixture.invoke(99, validSnapshotRequest())).rejects.toThrow("Untrusted renderer sender");
     expect(fixture.dialog.pickExistingProject).not.toHaveBeenCalled();
+    expect(fixture.supervisor.request).not.toHaveBeenCalled();
+  });
+
+  it("rejects a trusted WebContents whose top-level frame URL is not the exact renderer URL", async () => {
+    const fixture = gatewayFixture({ selectedPath: "/selected/by/main", senderId: 42 });
+    registerRendererGateway(fixture.dependencies);
+
+    await expect(fixture.invoke(42, validSnapshotRequest(), "https://evil.example/")).rejects.toThrow(
+      "Untrusted renderer frame"
+    );
+    expect(fixture.supervisor.getGeneration).not.toHaveBeenCalled();
     expect(fixture.supervisor.request).not.toHaveBeenCalled();
   });
 
@@ -558,5 +576,37 @@ describe("renderer gateway", () => {
     windowListeners.get("closed")?.();
     expect(ipcMain.removeHandler).toHaveBeenCalledWith("branchestra:request");
     expect(unsubscribe).toHaveBeenCalledOnce();
+  });
+
+  it("disposes the gateway and destroys the hidden window when renderer loading fails", async () => {
+    const loadFailure = new Error("load failed");
+    const fakeWindow = {
+      webContents: { id: 42, send: vi.fn(), setWindowOpenHandler: vi.fn(), on: vi.fn() },
+      once: vi.fn(),
+      show: vi.fn(),
+      loadURL: vi.fn(async () => { throw loadFailure; }),
+      loadFile: vi.fn(async () => { throw loadFailure; }),
+      destroy: vi.fn(),
+      isDestroyed: vi.fn(() => false),
+      isMinimized: vi.fn(() => false),
+      restore: vi.fn(),
+      focus: vi.fn()
+    };
+    vi.mocked(BrowserWindow).mockImplementationOnce(function () {
+      return fakeWindow as unknown as BrowserWindow;
+    });
+    const unsubscribe = vi.fn();
+    vi.mocked(createWorkerSupervisor).mockReturnValueOnce({
+      start: vi.fn(), request: vi.fn(), subscribe: vi.fn(() => unsubscribe), stop: vi.fn(),
+      getGeneration: vi.fn(() => generation)
+    });
+
+    bootstrapMain();
+    const lifecycle = vi.mocked(installApplicationLifecycle).mock.calls.at(-1)![0];
+    await expect(lifecycle.createWindow()).rejects.toBe(loadFailure);
+
+    expect(ipcMain.removeHandler).toHaveBeenCalledWith("branchestra:request");
+    expect(unsubscribe).toHaveBeenCalledOnce();
+    expect(fakeWindow.destroy).toHaveBeenCalledOnce();
   });
 });
