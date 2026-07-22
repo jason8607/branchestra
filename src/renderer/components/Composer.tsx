@@ -11,11 +11,12 @@ export function Composer(props: {
 
   async function send(): Promise<void> {
     if (cannotSend) return;
+    const submittedBody = body;
     setSending(true);
     setError(null);
     try {
-      await props.onSend(body);
-      setBody("");
+      await props.onSend(submittedBody);
+      setBody((currentBody) => currentBody === submittedBody ? "" : currentBody);
     } catch {
       setError("Message was not sent. Try again.");
     } finally {

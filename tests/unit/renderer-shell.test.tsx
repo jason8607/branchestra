@@ -3,7 +3,7 @@
 
 import { readFileSync } from "node:fs";
 import React from "react";
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -16,10 +16,16 @@ import type {
   Room,
   RoomEvent
 } from "../../src/shared/contracts/domain";
-import type {
-  TimelineState,
-  TimelineStore
+import {
+  createTimelineStore,
+  type TimelineState,
+  type TimelineStore
 } from "../../src/renderer/state/timeline-store";
+import type { BranchestraApi } from "../../src/shared/contracts/renderer-api";
+import type {
+  RendererCommand,
+  WorkerResponseEnvelope
+} from "../../src/shared/contracts/protocol";
 
 const PROJECT_ID = "10000000-0000-4000-8000-000000000001";
 const ROOM_ID = "20000000-0000-4000-8000-000000000001";
@@ -142,6 +148,37 @@ describe("renderer shell", () => {
     expect((input as HTMLInputElement).value).toBe("");
   });
 
+  it("exposes the create-room form for a selected empty project", () => {
+    const addedProject: Project = {
+      ...project(),
+      id: "10000000-0000-4000-8000-000000000002",
+      repositoryRoot: "/repo/new-project",
+      gitCommonDir: "/repo/new-project/.git",
+      displayName: "New Project"
+    };
+    const state: TimelineState = {
+      ...timelineState(),
+      snapshot: {
+        projects: [project(), addedProject],
+        rooms: [room()],
+        roomCursors: { [ROOM_ID]: 1 }
+      },
+      selectedProjectId: addedProject.id,
+      selectedRoomId: null
+    };
+    render(
+      <ProjectRail
+        state={state}
+        onAddProject={vi.fn()}
+        onSelectRoom={vi.fn()}
+        onCreateRoom={vi.fn()}
+      />
+    );
+
+    expect(screen.getByTestId("room-title-input").id).toBe(`room-title-${addedProject.id}`);
+    expect(screen.getByText("Create a room to start a timeline.")).toBeTruthy();
+  });
+
   it("selects a room and opens the native project picker", async () => {
     const user = userEvent.setup();
     const onAddProject = vi.fn();
@@ -181,6 +218,22 @@ describe("renderer shell", () => {
     expect(input.value).toBe("");
   });
 
+  it("keeps a newer draft when an earlier message resolves", async () => {
+    const user = userEvent.setup();
+    const pending = deferred();
+    render(<Composer disabled={false} onSend={() => pending.promise} />);
+
+    const input = screen.getByTestId("message-input") as HTMLTextAreaElement;
+    await user.type(input, "First message");
+    await user.click(screen.getByTestId("send-message"));
+    await user.clear(input);
+    await user.type(input, "Next draft");
+
+    await act(async () => pending.resolve());
+
+    expect(input.value).toBe("Next draft");
+  });
+
   it("retains the composer draft and gives guidance when sending rejects", async () => {
     const user = userEvent.setup();
     const pending = deferred();
@@ -193,6 +246,88 @@ describe("renderer shell", () => {
 
     expect(input.value).toBe("Keep this draft");
     expect(screen.getByRole("alert").textContent).toContain("not sent");
+  });
+
+  it("retains a newer draft and gives guidance when the submitted message rejects", async () => {
+    const user = userEvent.setup();
+    const pending = deferred();
+    render(<Composer disabled={false} onSend={() => pending.promise} />);
+
+    const input = screen.getByTestId("message-input") as HTMLTextAreaElement;
+    await user.type(input, "Submitted message");
+    await user.click(screen.getByTestId("send-message"));
+    await user.clear(input);
+    await user.type(input, "Draft written while sending");
+    await act(async () => pending.reject(new Error("offline")));
+
+    expect(input.value).toBe("Draft written while sending");
+    expect(screen.getByRole("alert").textContent).toContain("not sent");
+  });
+
+  it("retains the App composer draft when the real store receives a failed post response", async () => {
+    const user = userEvent.setup();
+    const commands: RendererCommand[] = [];
+    const api: BranchestraApi = {
+      async request(command) {
+        commands.push(command);
+        const base = {
+          v: 1 as const,
+          requestId: "80000000-0000-4000-8000-000000000001",
+          idempotencyKey: command.idempotencyKey,
+          workerGeneration: "50000000-0000-4000-8000-000000000001",
+          type: "response" as const
+        };
+        if (command.type === "message.post") {
+          return {
+            ...base,
+            payload: {
+              ok: false,
+              requestType: command.type,
+              code: "INTERNAL",
+              message: "Room is no longer available"
+            }
+          } satisfies WorkerResponseEnvelope;
+        }
+        const data = command.type === "state.getSnapshot"
+          ? { ...timelineState().snapshot, roomCursors: { [ROOM_ID]: 0 } }
+          : {
+              roomId: ROOM_ID,
+              events: [],
+              nextRoomSeq: 0,
+              hasMore: false
+            };
+        return {
+          ...base,
+          payload: {
+            ok: true,
+            requestType: command.type,
+            data,
+            replayed: false
+          }
+        } as WorkerResponseEnvelope;
+      },
+      subscribe() {
+        return () => undefined;
+      }
+    };
+    let id = 0;
+    const store = createTimelineStore(api, () => (
+      `70000000-0000-4000-8000-${String(++id).padStart(12, "0")}`
+    ));
+    render(<App store={store} />);
+    const input = screen.getByTestId("message-input") as HTMLTextAreaElement;
+    await waitFor(() => expect(input.disabled).toBe(false));
+
+    await user.type(input, "Keep this through the real store");
+    await user.click(screen.getByTestId("send-message"));
+
+    await waitFor(() => expect(screen.getByText("Message was not sent. Try again.")).toBeTruthy());
+    expect(input.value).toBe("Keep this through the real store");
+    expect(store.getState()).toMatchObject({
+      connection: "error",
+      error: "Room is no longer available"
+    });
+    expect(commands.filter((command) => command.type === "message.post")).toHaveLength(1);
   });
 
   it("disables message entry and submission when no connected room is available", () => {
@@ -250,6 +385,35 @@ describe("renderer shell", () => {
     act(() => listeners.forEach((listener) => listener()));
 
     expect(screen.getByText("Arrived from subscription")).toBeTruthy();
+  });
+
+  it("handles a selectRoom rejection while rendering the store error update", async () => {
+    const user = userEvent.setup();
+    let state = timelineState();
+    const listeners = new Set<() => void>();
+    const rejectedSelection = Promise.reject(new Error("Room replay failed"));
+    void rejectedSelection.catch(() => undefined);
+    const catchRejection = vi.spyOn(rejectedSelection, "catch");
+    const store: TimelineStore = {
+      ...preloadedTimelineStore(),
+      getState: () => state,
+      subscribe(listener) {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+      selectRoom: vi.fn(() => {
+        state = { ...state, connection: "error", error: "Room replay failed" };
+        listeners.forEach((listener) => listener());
+        return rejectedSelection;
+      })
+    };
+    render(<App store={store} />);
+
+    await user.click(screen.getByRole("button", { name: "Foundation" }));
+
+    await waitFor(() => expect(screen.getByText("Room replay failed")).toBeTruthy());
+    expect(catchRejection).toHaveBeenCalledOnce();
+    expect(store.getState()).toMatchObject({ connection: "error", error: "Room replay failed" });
   });
 
   it("constructs one timeline store and passes that singleton to the renderer", async () => {

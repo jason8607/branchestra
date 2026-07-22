@@ -514,7 +514,51 @@ describe("timeline store", () => {
       payload: {},
       idempotencyKey: projectCommands[0]?.idempotencyKey
     });
-    expect(store.getState().snapshot.projects).toEqual([project(), addedProject]);
+    expect(store.getState()).toMatchObject({
+      snapshot: { projects: [project(), addedProject] },
+      selectedProjectId: addedProject.id,
+      selectedRoomId: null
+    });
+  });
+
+  it("selects the first room belonging to a newly added project", async () => {
+    const addedProject = project("10000000-0000-4000-8000-000000000002");
+    const addedRoom = room("20000000-0000-4000-8000-000000000002", addedProject.id);
+    let snapshotRequests = 0;
+    const fixture = apiHarness((command) => {
+      if (command.type === "state.getSnapshot") {
+        snapshotRequests += 1;
+        return successResponse(command, snapshotRequests === 1
+          ? foundationSnapshot(0)
+          : {
+              projects: [project(), addedProject],
+              rooms: [room(), addedRoom],
+              roomCursors: { [ROOM_ID]: 0, [addedRoom.id]: 0 }
+            });
+      }
+      if (command.type === "room.replay") {
+        return successResponse(command, {
+          roomId: command.payload.roomId,
+          events: [],
+          nextRoomSeq: command.payload.roomSeq,
+          hasMore: false
+        });
+      }
+      if (command.type === "project.pickExisting") return successResponse(command, addedProject);
+      throw new Error(`Unexpected command: ${command.type}`);
+    });
+    const store = createTimelineStore(fixture.api, sequentialIds());
+    await store.hydrate();
+
+    await store.addProject();
+
+    expect(store.getState()).toMatchObject({
+      selectedProjectId: addedProject.id,
+      selectedRoomId: addedRoom.id
+    });
+    expect(fixture.commands.filter((command) => command.type === "room.replay").at(-1)).toMatchObject({
+      payload: { roomId: addedRoom.id, roomSeq: 0 }
+    });
   });
 
   it("rejects whitespace-only room titles and messages before issuing mutations", async () => {
@@ -544,7 +588,9 @@ describe("timeline store", () => {
     const store = createTimelineStore(fixture.api, sequentialIds());
     await store.hydrate();
 
-    await store.postMessage(ROOM_ID, "hello");
+    await expect(store.postMessage(ROOM_ID, "hello")).rejects.toThrow(
+      "That room is no longer available"
+    );
 
     expect(fixture.commands.filter((command) => command.type === "message.post")).toHaveLength(1);
     expect(store.getState()).toMatchObject({
@@ -565,7 +611,9 @@ describe("timeline store", () => {
     const store = createTimelineStore(fixture.api, sequentialIds());
     await store.hydrate();
 
-    await store.postMessage(ROOM_ID, "hello");
+    await expect(store.postMessage(ROOM_ID, "hello")).rejects.toThrow(
+      "Unable to post message"
+    );
 
     expect(store.getState()).toMatchObject({
       connection: "error",

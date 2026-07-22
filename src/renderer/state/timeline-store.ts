@@ -409,6 +409,22 @@ export function createTimelineStore(
         const parsedProject = ProjectSchema.safeParse(data);
         if (!parsedProject.success) throw new Error("Unable to add project");
         await forceFreshHydrate(operationEpoch);
+        if (!isCurrent(operationEpoch) || state.connection === "error") return;
+        const addedProject = state.snapshot.projects.find((candidate) => (
+          candidate.id === parsedProject.data.id
+        ));
+        if (!addedProject) return;
+        const firstRoom = state.snapshot.rooms.find((candidate) => (
+          candidate.projectId === addedProject.id
+        ));
+        if (firstRoom) {
+          await selectRoom(firstRoom.id);
+          return;
+        }
+        patchCurrent(operationEpoch, {
+          selectedProjectId: addedProject.id,
+          selectedRoomId: null
+        });
       } catch (error) {
         patchStatus(operationEpoch, statusOperation, {
           connection: "error",
@@ -467,11 +483,7 @@ export function createTimelineStore(
         });
         if (!isCurrent(operationEpoch)) return;
         if (!response.payload.ok) {
-          patchStatus(operationEpoch, statusOperation, {
-            connection: "error",
-            error: response.payload.message
-          });
-          return;
+          throw new Error(response.payload.message);
         }
         if (response.payload.requestType !== "message.post") {
           throw new Error("Unexpected message response");
@@ -480,10 +492,13 @@ export function createTimelineStore(
         if (!parsedEvent.success) throw new Error("Unable to post message");
         acceptEvent(parsedEvent.data, operationEpoch);
       } catch (error) {
+        if (!isCurrent(operationEpoch)) return;
+        const message = error instanceof Error ? error.message : "Unable to post message";
         patchStatus(operationEpoch, statusOperation, {
           connection: "error",
-          error: error instanceof Error ? error.message : "Unable to post message"
+          error: message
         });
+        throw new Error(message, { cause: error });
       }
     },
     dispose() {
