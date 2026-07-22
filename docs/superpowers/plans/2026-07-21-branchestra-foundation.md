@@ -273,9 +273,7 @@ Run: `corepack pnpm install`
 
 Run: `corepack pnpm peers check`
 
-Run: `corepack pnpm ignored-builds`
-
-Expected: pnpm reports version `11.15.1`, installs only the exact direct versions above (including Renderer test and lint tooling), creates `pnpm-lock.yaml`, reports no peer issues, and reports no automatically ignored build scripts. Only the reviewed `esbuild` install script is allowed.
+Expected: pnpm reports version `11.15.1`, installs only the exact direct versions above (including Renderer test and lint tooling), creates `pnpm-lock.yaml`, exits without `ERR_PNPM_IGNORED_BUILDS`, and reports no peer issues. Because pnpm 11 defaults `strictDepBuilds` to true, any build script other than the reviewed `esbuild` entry fails installation.
 
 - [ ] **Step 3: Run the security test to verify it fails**
 
