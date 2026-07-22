@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -13,6 +13,16 @@ async function makeFixture(): Promise<GitRepositoryFixture> {
   const fixture = await createGitRepositoryFixture();
   fixtures.push(fixture);
   return fixture;
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return false;
+    throw error;
+  }
 }
 
 afterEach(async () => {
@@ -67,6 +77,13 @@ describe("GitReadService repository identity", () => {
     expect(identity.headOid).toMatch(/^[0-9a-f]{64}$/);
     expect(identity.headRef).toBe("refs/heads/main");
   });
+
+  it("rejects a selected repository whose observed top-level differs from the stored root", async () => {
+    const stored = await makeFixture();
+    const selected = await makeFixture();
+    const service = new GitReadService(new GitCommandRunner());
+    await expect(service.inspectRepository(selected.root, stored.root)).rejects.toThrow("REPOSITORY_IDENTITY_MISMATCH");
+  });
 });
 
 describe("GitReadService read-only queries", () => {
@@ -86,6 +103,70 @@ describe("GitReadService read-only queries", () => {
     expect(status.entries.join("\n")).toContain("README.md");
     expect(status.entries.join("\n")).toContain("untracked file.txt");
     expect(status.inProgressOperation).toBeNull();
+  });
+
+  it("rejects status when the worktree belongs to another repository", async () => {
+    const repository = await makeFixture();
+    const otherRepository = await makeFixture();
+    const service = new GitReadService(new GitCommandRunner());
+    await expect(service.status({
+      repositoryRootRealpath: repository.root,
+      worktreePathRealpath: otherRepository.root
+    })).rejects.toThrow("REPOSITORY_IDENTITY_MISMATCH");
+  });
+
+  it("does not execute configured fsmonitor, external-diff, or textconv helpers", async () => {
+    const fixture = await makeFixture();
+    const sentinel = join(fixture.root, "HELPER_EXECUTED");
+    const helper = join(fixture.root, "configured helper.sh");
+    const quotedSentinel = sentinel.replaceAll("'", "'\\''");
+    const quotedHelper = `'${helper.replaceAll("'", "'\\''")}'`;
+    await writeFile(helper, `#!/bin/sh\n/usr/bin/touch '${quotedSentinel}'\nexit 0\n`);
+    await chmod(helper, 0o755);
+    await fixture.run(["config", "core.fsmonitor", quotedHelper]);
+    await fixture.run(["config", "diff.external", quotedHelper]);
+    await fixture.run(["config", "diff.sentinel.textconv", quotedHelper]);
+    await fixture.write(".gitattributes", "README.md diff=sentinel\n");
+    await fixture.write("README.md", "changed\n");
+    const service = new GitReadService(new GitCommandRunner());
+
+    await service.status({ repositoryRootRealpath: fixture.root, worktreePathRealpath: fixture.root });
+    await service.diff({ repositoryRootRealpath: fixture.root, fromOid: fixture.initialOid });
+    await service.show({ repositoryRootRealpath: fixture.root, oid: fixture.initialOid, path: "README.md" });
+    await service.log({ repositoryRootRealpath: fixture.root, startOid: fixture.initialOid, maxCount: 1 });
+
+    expect(await pathExists(sentinel)).toBe(false);
+  });
+
+  it("does not mutate or lock the index during status", async () => {
+    const fixture = await makeFixture();
+    const indexPath = join(fixture.commonDirRealpath, "index");
+    await fixture.write("README.md", "working tree change\n");
+    const beforeBytes = await readFile(indexPath);
+    const beforeStat = await stat(indexPath, { bigint: true });
+
+    await new GitReadService(new GitCommandRunner()).status({
+      repositoryRootRealpath: fixture.root,
+      worktreePathRealpath: fixture.root
+    });
+
+    expect(await readFile(indexPath)).toEqual(beforeBytes);
+    expect((await stat(indexPath, { bigint: true })).mtimeNs).toBe(beforeStat.mtimeNs);
+    expect(await pathExists(`${indexPath}.lock`)).toBe(false);
+  });
+
+  it("rejects invalid UTF-8 path bytes instead of returning replacement characters", async () => {
+    const fixture = await makeFixture();
+    const output = Buffer.concat([
+      Buffer.from(`worktree ${fixture.root}/invalid-`),
+      Buffer.from([0xff]),
+      Buffer.from(`\0HEAD ${fixture.initialOid}\0branch refs/heads/main\0\0`)
+    ]);
+    const git = {
+      async run() { return { stdout: "", stderr: "" }; },
+      async runBuffer() { return output; }
+    };
+    await expect(new GitReadService(git).listWorktrees(fixture.root)).rejects.toThrow("GIT_OUTPUT_INVALID_UTF8");
   });
 
   it.each([
@@ -145,6 +226,43 @@ describe("GitReadService read-only queries", () => {
     expect(log[0]).toMatchObject({ oid: head, subject: "Odd path" });
   });
 
+  it("preserves record and field separator bytes in a real commit subject", async () => {
+    const fixture = await makeFixture();
+    const subject = `control-${String.fromCharCode(0x1e)}-and-${String.fromCharCode(0x1f)}-bytes`;
+    await fixture.write("control.txt", "control\n");
+    await fixture.run(["add", "--", "control.txt"]);
+    await fixture.run(["commit", "--no-gpg-sign", "-m", subject]);
+    const head = (await fixture.run(["rev-parse", "HEAD"])).stdout.trim();
+
+    const entries = await new GitReadService(new GitCommandRunner()).log({
+      repositoryRootRealpath: fixture.root,
+      startOid: head,
+      maxCount: 1
+    });
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.subject).toBe(subject);
+  });
+
+  it("rejects log metadata with a syntactically shaped but impossible authored date", async () => {
+    const oid = "a".repeat(40);
+    let call = 0;
+    const git = {
+      async run() { return { stdout: "", stderr: "" }; },
+      async runBuffer() {
+        call += 1;
+        return call === 1
+          ? Buffer.from(`${oid}\0`)
+          : Buffer.from(`${oid}\n\n2026-99-99T99:99:99+99:99\nsubject\n`);
+      }
+    };
+    await expect(new GitReadService(git).log({
+      repositoryRootRealpath: "/repo",
+      startOid: oid,
+      maxCount: 1
+    })).rejects.toThrow("GIT_OUTPUT_INVALID");
+  });
+
   it.each([0, -1, 201, 1.5])("rejects an out-of-range log count %s", async (maxCount) => {
     const fixture = await makeFixture();
     const service = new GitReadService(new GitCommandRunner());
@@ -176,14 +294,17 @@ describe("GitReadService read-only queries", () => {
         (calls as string[][]).push([...argv]);
         return { stdout: "", stderr: "" };
       },
-      async runBuffer() { return Buffer.alloc(0); }
+      async runBuffer(_cwd: string, argv: readonly string[]) {
+        (calls as string[][]).push([...argv]);
+        return Buffer.alloc(0);
+      }
     };
     const service = new GitReadService(git);
     await service.show({ repositoryRootRealpath: "/repo", oid: "a".repeat(40) });
     await service.show({ repositoryRootRealpath: "/repo", oid: "b".repeat(64) });
     expect(calls).toEqual([
-      ["show", "a".repeat(40)],
-      ["show", "b".repeat(64)]
+      ["show", "--no-ext-diff", "--no-textconv", "a".repeat(40)],
+      ["show", "--no-ext-diff", "--no-textconv", "b".repeat(64)]
     ]);
   });
 
@@ -223,5 +344,15 @@ describe("GitReadService read-only queries", () => {
       }
     };
     await expect(new GitReadService(git).listWorktrees(fixture.root)).rejects.toThrow("GIT_REF_INVALID");
+  });
+
+  it("times out and kills a Git-configured executable alias", async () => {
+    const fixture = await makeFixture();
+    const runner = new GitCommandRunner({ timeoutMs: 50 });
+    const startedAt = Date.now();
+    await expect(runner.run(fixture.root, [
+      "-c", "alias.hang=!/bin/sleep 10", "hang"
+    ])).rejects.toMatchObject({ killed: true });
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
   });
 });

@@ -1,6 +1,8 @@
 import { access, realpath } from "node:fs/promises";
 import { isAbsolute, sep } from "node:path";
+import { TextDecoder } from "node:util";
 import { GitCommandRunner } from "./git-command-runner";
+import { assertBranchRef, assertGitOid } from "./git-validation";
 
 export interface RepositoryIdentity {
   rootRealpath: string;
@@ -39,8 +41,6 @@ export interface GitLogEntry {
 
 export class GitReadError extends Error {}
 
-const OID_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
-const BRANCH_REF_PATTERN = /^refs\/heads\/[A-Za-z0-9._/-]+$/;
 const STATUS_SENTINELS = [
   ["MERGE_HEAD", "merge"],
   ["CHERRY_PICK_HEAD", "cherry-pick"],
@@ -48,6 +48,8 @@ const STATUS_SENTINELS = [
   ["REBASE_HEAD", "rebase"],
   ["BISECT_LOG", "bisect"]
 ] as const;
+const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
+const DIFF_SAFETY_OPTIONS = ["--no-ext-diff", "--no-textconv"] as const;
 
 function line(output: string): string {
   if (output.endsWith("\r\n")) return output.slice(0, -2);
@@ -55,17 +57,11 @@ function line(output: string): string {
   return output;
 }
 
-function assertOid(oid: string): void {
-  if (!OID_PATTERN.test(oid)) throw new GitReadError("GIT_OID_INVALID");
-}
-
-function assertBranchRef(ref: string): void {
-  if (!BRANCH_REF_PATTERN.test(ref)
-    || ref.includes("..")
-    || ref.includes("//")
-    || ref.endsWith("/")
-    || ref.endsWith(".lock")) {
-    throw new GitReadError("GIT_REF_INVALID");
+function decodeUtf8(buffer: Buffer): string {
+  try {
+    return UTF8_DECODER.decode(buffer);
+  } catch (error) {
+    throw new GitReadError("GIT_OUTPUT_INVALID_UTF8", { cause: error });
   }
 }
 
@@ -81,12 +77,12 @@ function assertPathspec(pathspec: string): void {
 }
 
 function splitNul(buffer: Buffer): string[] {
-  return buffer.toString("utf8").split("\0").filter((entry) => entry.length > 0);
+  return decodeUtf8(buffer).split("\0").filter((entry) => entry.length > 0);
 }
 
 function revisionArguments(fromOid: string, toOid: string | undefined): string[] {
-  assertOid(fromOid);
-  if (toOid !== undefined) assertOid(toOid);
+  assertGitOid(fromOid);
+  if (toOid !== undefined) assertGitOid(toOid);
   return toOid === undefined ? [fromOid] : [fromOid, toOid];
 }
 
@@ -126,7 +122,7 @@ interface Numstat {
 }
 
 function parseNumstat(buffer: Buffer): Numstat[] {
-  const tokens = buffer.toString("utf8").split("\0");
+  const tokens = decodeUtf8(buffer).split("\0");
   const entries: Numstat[] = [];
   for (let index = 0; index < tokens.length;) {
     const token = tokens[index];
@@ -158,7 +154,7 @@ function parseNumstat(buffer: Buffer): Numstat[] {
 export class GitReadService {
   constructor(private readonly git: Pick<GitCommandRunner, "run" | "runBuffer">) {}
 
-  async inspectRepository(selectedPath: string): Promise<RepositoryIdentity> {
+  async inspectRepository(selectedPath: string, storedRepositoryRootRealpath?: string): Promise<RepositoryIdentity> {
     const selectedRealpath = await realpath(selectedPath);
     const bare = line((await this.git.run(selectedRealpath, ["rev-parse", "--is-bare-repository"])).stdout);
     if (bare === "true") throw new GitReadError("REPOSITORY_BARE");
@@ -167,6 +163,10 @@ export class GitReadService {
       "rev-parse", "--path-format=absolute", "--show-toplevel"
     ])).stdout);
     const rootRealpath = await realpath(rootOutput);
+    if (storedRepositoryRootRealpath !== undefined
+      && rootRealpath !== await realpath(storedRepositoryRootRealpath)) {
+      throw new GitReadError("REPOSITORY_IDENTITY_MISMATCH");
+    }
     const commonOutput = line((await this.git.run(rootRealpath, [
       "rev-parse", "--path-format=absolute", "--git-common-dir"
     ])).stdout);
@@ -182,7 +182,7 @@ export class GitReadService {
     } catch (error) {
       throw new GitReadError("REPOSITORY_HEAD_MISSING", { cause: error });
     }
-    assertOid(headOid);
+    assertGitOid(headOid);
 
     let headRef: string;
     try {
@@ -198,13 +198,24 @@ export class GitReadService {
     repositoryRootRealpath: string;
     worktreePathRealpath: string;
   }): Promise<GitStatus> {
-    const statusBuffer = await this.git.runBuffer(input.worktreePathRealpath, [
+    const repositoryRootRealpath = await realpath(input.repositoryRootRealpath);
+    const worktreePathRealpath = await realpath(input.worktreePathRealpath);
+    const [repositoryIdentity, worktreeIdentity] = await Promise.all([
+      this.observeRepositoryLocation(repositoryRootRealpath),
+      this.observeRepositoryLocation(worktreePathRealpath)
+    ]);
+    if (repositoryIdentity.rootRealpath !== repositoryRootRealpath
+      || worktreeIdentity.rootRealpath !== worktreePathRealpath
+      || repositoryIdentity.commonDirRealpath !== worktreeIdentity.commonDirRealpath) {
+      throw new GitReadError("REPOSITORY_IDENTITY_MISMATCH");
+    }
+    const statusBuffer = await this.git.runBuffer(worktreePathRealpath, [
       "status", "--porcelain=v2", "-z", "--untracked-files=all"
     ]);
     const entries = splitNul(statusBuffer);
     let inProgressOperation: string | null = null;
     for (const [sentinel, operation] of STATUS_SENTINELS) {
-      const sentinelPath = line((await this.git.run(input.worktreePathRealpath, [
+      const sentinelPath = line((await this.git.run(worktreePathRealpath, [
         "rev-parse", "--path-format=absolute", "--git-path", sentinel
       ])).stdout);
       try {
@@ -225,9 +236,9 @@ export class GitReadService {
     pathspec?: string[];
   }): Promise<{ patch: string; files: GitDiffFile[] }> {
     const revisions = revisionArguments(input.fromOid, input.toOid);
-    const patchArgv = appendPathspec(["diff", "--binary", ...revisions], input.pathspec);
-    const numstatArgv = appendPathspec(["diff", "--numstat", "-z", ...revisions], input.pathspec);
-    const namesArgv = appendPathspec(["diff", "--name-status", "-z", ...revisions], input.pathspec);
+    const patchArgv = appendPathspec(["diff", ...DIFF_SAFETY_OPTIONS, "--binary", ...revisions], input.pathspec);
+    const numstatArgv = appendPathspec(["diff", ...DIFF_SAFETY_OPTIONS, "--numstat", "-z", ...revisions], input.pathspec);
+    const namesArgv = appendPathspec(["diff", ...DIFF_SAFETY_OPTIONS, "--name-status", "-z", ...revisions], input.pathspec);
     const [patch, numstat, names] = await Promise.all([
       this.git.runBuffer(input.repositoryRootRealpath, patchArgv),
       this.git.runBuffer(input.repositoryRootRealpath, numstatArgv),
@@ -239,17 +250,17 @@ export class GitReadService {
       if (numbers === undefined) throw new GitReadError("GIT_OUTPUT_INVALID");
       return { path, status, additions: numbers.additions, deletions: numbers.deletions };
     });
-    return { patch: patch.toString("utf8"), files };
+    return { patch: decodeUtf8(patch), files };
   }
 
   async show(input: { repositoryRootRealpath: string; oid: string; path?: string }): Promise<string> {
-    assertOid(input.oid);
-    const argv = ["show", input.oid];
+    assertGitOid(input.oid);
+    const argv = ["show", ...DIFF_SAFETY_OPTIONS, input.oid];
     if (input.path !== undefined) {
       assertPathspec(input.path);
       argv.push("--", input.path);
     }
-    return (await this.git.run(input.repositoryRootRealpath, argv)).stdout;
+    return decodeUtf8(await this.git.runBuffer(input.repositoryRootRealpath, argv));
   }
 
   async log(input: {
@@ -257,23 +268,33 @@ export class GitReadService {
     startOid: string;
     maxCount: number;
   }): Promise<GitLogEntry[]> {
-    assertOid(input.startOid);
+    assertGitOid(input.startOid);
     if (!Number.isInteger(input.maxCount) || input.maxCount < 1 || input.maxCount > 200) {
       throw new GitReadError("GIT_LOG_COUNT_INVALID");
     }
-    const output = (await this.git.run(input.repositoryRootRealpath, [
+    const oidBuffer = await this.git.runBuffer(input.repositoryRootRealpath, [
       "log",
+      ...DIFF_SAFETY_OPTIONS,
       `--max-count=${input.maxCount}`,
-      "--format=%H%x1f%P%x1f%aI%x1f%s%x1e",
+      "--format=%H",
+      "-z",
       input.startOid
-    ])).stdout;
-    return output.split("\x1e").filter((record) => record.trim().length > 0).map((record) => {
-      const [oid = "", rawParents = "", authoredAt = "", subject = ""] = record.trimStart().split("\x1f");
-      assertOid(oid);
-      const parents = rawParents === "" ? [] : rawParents.split(" ");
-      for (const parent of parents) assertOid(parent);
-      return { oid, parents, subject, authoredAt };
-    });
+    ]);
+    const oids = splitNul(oidBuffer);
+    if (oids.length < 1 || oids.length > input.maxCount) throw new GitReadError("GIT_OUTPUT_INVALID");
+    for (const oid of oids) assertGitOid(oid);
+    const entries: GitLogEntry[] = [];
+    for (const oid of oids) {
+      const metadata = await this.git.runBuffer(input.repositoryRootRealpath, [
+        "show",
+        ...DIFF_SAFETY_OPTIONS,
+        "--no-patch",
+        "--format=%H%n%P%n%aI%n%s",
+        oid
+      ]);
+      entries.push(this.parseLogMetadata(oid, metadata));
+    }
+    return entries;
   }
 
   async listWorktrees(repositoryRootRealpath: string): Promise<GitWorktreeOwner[]> {
@@ -295,7 +316,7 @@ export class GitReadService {
 
     return Promise.all(records.map(async (record) => {
       if (record.worktree === undefined || record.HEAD === undefined) throw new GitReadError("GIT_OUTPUT_INVALID");
-      assertOid(record.HEAD);
+      assertGitOid(record.HEAD);
       const branchRef = record.branch ?? null;
       if (branchRef !== null) assertBranchRef(branchRef);
       return {
@@ -305,5 +326,35 @@ export class GitReadService {
         locked: record.locked !== undefined
       };
     }));
+  }
+
+  private async observeRepositoryLocation(cwdRealpath: string): Promise<{
+    rootRealpath: string;
+    commonDirRealpath: string;
+  }> {
+    const [rootOutput, commonOutput] = await Promise.all([
+      this.git.run(cwdRealpath, ["rev-parse", "--path-format=absolute", "--show-toplevel"]),
+      this.git.run(cwdRealpath, ["rev-parse", "--path-format=absolute", "--git-common-dir"])
+    ]);
+    return {
+      rootRealpath: await realpath(line(rootOutput.stdout)),
+      commonDirRealpath: await realpath(line(commonOutput.stdout))
+    };
+  }
+
+  private parseLogMetadata(expectedOid: string, buffer: Buffer): GitLogEntry {
+    const output = line(decodeUtf8(buffer));
+    const fields = output.split("\n");
+    if (fields.length !== 4) throw new GitReadError("GIT_OUTPUT_INVALID");
+    const [oid = "", rawParents = "", authoredAt = "", subject = ""] = fields;
+    assertGitOid(oid);
+    if (oid !== expectedOid
+      || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?[+-]\d{2}:\d{2}$/.test(authoredAt)
+      || Number.isNaN(Date.parse(authoredAt))) {
+      throw new GitReadError("GIT_OUTPUT_INVALID");
+    }
+    const parents = rawParents === "" ? [] : rawParents.split(" ");
+    for (const parent of parents) assertGitOid(parent);
+    return { oid, parents, subject, authoredAt };
   }
 }

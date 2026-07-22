@@ -16,9 +16,12 @@ describe("GitCommandRunner", () => {
     });
 
     expect(execFile).toHaveBeenCalledWith("/usr/bin/git", [
+      "--no-pager",
       "-c", "user.name=Branchestra",
       "-c", "user.email=branchestra@localhost",
       "-c", "core.hooksPath=/dev/null",
+      "-c", "core.fsmonitor=false",
+      "-c", "log.showSignature=false",
       "-C", "/repo with spaces", "rev-parse", "HEAD"
     ], {
       shell: false,
@@ -28,10 +31,13 @@ describe("GitCommandRunner", () => {
         LC_ALL: "C",
         GIT_TERMINAL_PROMPT: "0",
         GIT_CONFIG_NOSYSTEM: "1",
-        GIT_CONFIG_GLOBAL: "/dev/null"
+        GIT_CONFIG_GLOBAL: "/dev/null",
+        GIT_OPTIONAL_LOCKS: "0"
       },
       encoding: "utf8",
-      maxBuffer: 16 * 1024 * 1024
+      maxBuffer: 16 * 1024 * 1024,
+      timeout: 15_000,
+      killSignal: "SIGKILL"
     }, expect.any(Function));
   });
 
@@ -47,7 +53,9 @@ describe("GitCommandRunner", () => {
     expect(execFile).toHaveBeenCalledWith("/usr/bin/git", expect.any(Array), expect.objectContaining({
       shell: false,
       encoding: "buffer",
-      maxBuffer: 64 * 1024 * 1024
+      maxBuffer: 64 * 1024 * 1024,
+      timeout: 15_000,
+      killSignal: "SIGKILL"
     }), expect.any(Function));
   });
 });

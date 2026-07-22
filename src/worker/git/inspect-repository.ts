@@ -2,6 +2,7 @@ import type { execFile as nodeExecFile } from "node:child_process";
 import { realpath as nodeRealpath } from "node:fs/promises";
 import type { ExecFileRunner } from "../process/exec-file";
 import { GitCommandRunner, type GitCommandResult } from "./git-command-runner";
+import { assertGitOid } from "./git-validation";
 
 export interface RepositoryInspection {
   repositoryRoot: string;
@@ -39,7 +40,12 @@ export async function inspectExistingRepository(
       _options: unknown,
       callback: (error: Error | null, stdout: string, stderr: string) => void
     ) => {
-      void dependencies.execFile(executable, argv.slice(6), {
+      const cwdIndex = argv.indexOf("-C");
+      if (cwdIndex === -1) {
+        callback(new Error("Git runner omitted -C"), "", "");
+        return undefined;
+      }
+      void dependencies.execFile(executable, argv.slice(cwdIndex), {
         timeoutMs: 5_000,
         maxBufferBytes: 1_048_576
       }).then(
@@ -63,7 +69,7 @@ export async function inspectExistingRepository(
     const gitCommonDir = await canonicalize(gitCommonDirOutput);
     const headOid = await runGit(repositoryRoot, ["rev-parse", "--verify", "HEAD^{commit}"]);
     const branch = await runGit(repositoryRoot, ["rev-parse", "--abbrev-ref", "HEAD"]);
-    if (!/^[0-9a-f]{40,64}$/.test(headOid)) throw new Error("HEAD is not a commit OID");
+    assertGitOid(headOid);
     return {
       repositoryRoot,
       gitCommonDir,
