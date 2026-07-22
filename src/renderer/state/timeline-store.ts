@@ -30,6 +30,7 @@ export interface TimelineStore {
 }
 
 const EMPTY_SNAPSHOT: AppSnapshot = { projects: [], rooms: [], roomCursors: {} };
+const POST_INTERRUPTED_MESSAGE = "Message delivery was interrupted. Try again.";
 Object.freeze(EMPTY_SNAPSHOT.projects);
 Object.freeze(EMPTY_SNAPSHOT.rooms);
 Object.freeze(EMPTY_SNAPSHOT.roomCursors);
@@ -481,7 +482,7 @@ export function createTimelineStore(
           payload: { roomId, body: trimmedBody },
           idempotencyKey: nextId()
         });
-        if (!isCurrent(operationEpoch)) return;
+        if (!isCurrent(operationEpoch)) throw new Error(POST_INTERRUPTED_MESSAGE);
         if (!response.payload.ok) {
           throw new Error(response.payload.message);
         }
@@ -492,7 +493,9 @@ export function createTimelineStore(
         if (!parsedEvent.success) throw new Error("Unable to post message");
         acceptEvent(parsedEvent.data, operationEpoch);
       } catch (error) {
-        if (!isCurrent(operationEpoch)) return;
+        if (!isCurrent(operationEpoch)) {
+          throw new Error(POST_INTERRUPTED_MESSAGE, { cause: error });
+        }
         const message = error instanceof Error ? error.message : "Unable to post message";
         patchStatus(operationEpoch, statusOperation, {
           connection: "error",

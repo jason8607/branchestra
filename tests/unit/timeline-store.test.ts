@@ -785,7 +785,7 @@ describe("timeline store", () => {
     expect(store.getState()).toMatchObject({ connection: "ready", error: null });
   });
 
-  it("ignores a mutation rejection from an obsolete worker generation", async () => {
+  it("rejects an obsolete post without publishing its mutation failure", async () => {
     const nextGeneration = "50000000-0000-4000-8000-000000000002";
     const oldMutation = deferred<WorkerResponseEnvelope>();
     const fixture = apiHarness((command) => {
@@ -812,15 +812,18 @@ describe("timeline store", () => {
     expect(fixture.commands.filter((command) => command.type === "state.getSnapshot")).toHaveLength(2);
     expect(store.getState().connection).toBe("ready");
     const notificationsBeforeRejection = listener.mock.calls.length;
+    const postingResult = expect(posting).rejects.toThrow(
+      "Message delivery was interrupted. Try again."
+    );
     oldMutation.reject(new Error("obsolete mutation failed"));
-    await posting;
+    await postingResult;
 
     expect(store.getState()).toMatchObject({ connection: "ready", error: null });
     expect(store.getState().eventsByRoom[ROOM_ID]).toBeUndefined();
     expect(listener).toHaveBeenCalledTimes(notificationsBeforeRejection);
   });
 
-  it("ignores a successful mutation response from an obsolete worker generation", async () => {
+  it("rejects an obsolete post even when its old-generation response succeeds", async () => {
     const nextGeneration = "50000000-0000-4000-8000-000000000002";
     const oldMutation = deferred<WorkerResponseEnvelope>();
     const fixture = apiHarness((command) => {
@@ -840,8 +843,11 @@ describe("timeline store", () => {
     const postCommand = fixture.commands.find((command) => command.type === "message.post");
     if (!postCommand) throw new Error("Expected old message mutation");
 
+    const postingResult = expect(posting).rejects.toThrow(
+      "Message delivery was interrupted. Try again."
+    );
     oldMutation.resolve(successResponse(postCommand, messageEvent(1)));
-    await posting;
+    await postingResult;
 
     expect(store.getState()).toMatchObject({ connection: "ready", error: null });
     expect(store.getState().eventsByRoom[ROOM_ID]).toBeUndefined();
@@ -989,7 +995,7 @@ describe("timeline store", () => {
     expect(store.getState()).toMatchObject({ connection: "ready", error: null });
   });
 
-  it("invalidates pending mutation failures as soon as the worker disconnects", async () => {
+  it("rejects a pending post after disconnect without replacing reconnecting state", async () => {
     const mutation = deferred<WorkerResponseEnvelope>();
     const fixture = apiHarness((command) => {
       if (command.type === "state.getSnapshot") {
@@ -1005,8 +1011,11 @@ describe("timeline store", () => {
     await Promise.resolve();
 
     fixture.emit(workerEvent("worker.disconnected", GENERATION));
+    const postingResult = expect(posting).rejects.toThrow(
+      "Message delivery was interrupted. Try again."
+    );
     mutation.reject(new Error("disconnected mutation failed"));
-    await posting;
+    await postingResult;
 
     expect(store.getState()).toMatchObject({ connection: "reconnecting", error: null });
   });

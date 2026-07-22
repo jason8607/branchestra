@@ -24,11 +24,13 @@ import {
 import type { BranchestraApi } from "../../src/shared/contracts/renderer-api";
 import type {
   RendererCommand,
+  WorkerEventEnvelope,
   WorkerResponseEnvelope
 } from "../../src/shared/contracts/protocol";
 
 const PROJECT_ID = "10000000-0000-4000-8000-000000000001";
 const ROOM_ID = "20000000-0000-4000-8000-000000000001";
+const GENERATION = "50000000-0000-4000-8000-000000000001";
 const CREATED_AT = "2026-07-21T10:00:00.000Z";
 const rendererStyles = readFileSync("src/renderer/styles.css", "utf8");
 
@@ -99,14 +101,84 @@ function preloadedTimelineStore(): TimelineStore {
   };
 }
 
-function deferred() {
-  let resolve!: () => void;
+function deferred<T = void>() {
+  let resolve!: (value: T) => void;
   let reject!: (error: Error) => void;
-  const promise = new Promise<void>((fulfill, fail) => {
+  const promise = new Promise<T>((fulfill, fail) => {
     resolve = fulfill;
     reject = fail;
   });
   return { promise, resolve, reject };
+}
+
+function successRendererResponse(
+  command: RendererCommand,
+  data: unknown
+): WorkerResponseEnvelope {
+  return {
+    v: 1,
+    requestId: "80000000-0000-4000-8000-000000000001",
+    idempotencyKey: command.idempotencyKey,
+    workerGeneration: GENERATION,
+    type: "response",
+    payload: {
+      ok: true,
+      requestType: command.type,
+      data: data as ReturnType<typeof timelineState>["snapshot"],
+      replayed: false
+    }
+  };
+}
+
+function realRendererApi(
+  post: (command: RendererCommand) => Promise<WorkerResponseEnvelope> | WorkerResponseEnvelope
+): {
+  api: BranchestraApi;
+  commands: RendererCommand[];
+  disconnect(): void;
+} {
+  const commands: RendererCommand[] = [];
+  const listeners = new Set<(event: WorkerEventEnvelope) => void>();
+  const api: BranchestraApi = {
+    async request(command) {
+      commands.push(command);
+      if (command.type === "message.post") return post(command);
+      if (command.type === "state.getSnapshot") {
+        return successRendererResponse(command, {
+          ...timelineState().snapshot,
+          roomCursors: { [ROOM_ID]: 0 }
+        });
+      }
+      if (command.type === "room.replay") {
+        return successRendererResponse(command, {
+          roomId: ROOM_ID,
+          events: [],
+          nextRoomSeq: 0,
+          hasMore: false
+        });
+      }
+      throw new Error(`Unexpected command: ${command.type}`);
+    },
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    }
+  };
+  return {
+    api,
+    commands,
+    disconnect() {
+      const event: WorkerEventEnvelope = {
+        v: 1,
+        requestId: "60000000-0000-4000-8000-000000000001",
+        idempotencyKey: "disconnect-1",
+        workerGeneration: GENERATION,
+        type: "worker.disconnected",
+        payload: { reason: "worker exited" }
+      };
+      listeners.forEach((listener) => listener(event));
+    }
+  };
 }
 
 afterEach(cleanup);
@@ -328,6 +400,77 @@ describe("renderer shell", () => {
       error: "Room is no longer available"
     });
     expect(commands.filter((command) => command.type === "message.post")).toHaveLength(1);
+  });
+
+  it("retains the real-store draft when an old post succeeds after disconnect", async () => {
+    const user = userEvent.setup();
+    const pending = deferred<WorkerResponseEnvelope>();
+    const fixture = realRendererApi(() => pending.promise);
+    let id = 0;
+    const store = createTimelineStore(fixture.api, () => (
+      `70000000-0000-4000-8000-${String(++id).padStart(12, "0")}`
+    ));
+    const storeListener = vi.fn();
+    store.subscribe(storeListener);
+    render(<App store={store} />);
+    const input = screen.getByTestId("message-input") as HTMLTextAreaElement;
+    await waitFor(() => expect(input.disabled).toBe(false));
+    await user.type(input, "Draft survives stale success");
+    await user.click(screen.getByTestId("send-message"));
+    await waitFor(() => expect(
+      fixture.commands.filter((command) => command.type === "message.post")
+    ).toHaveLength(1));
+    const postCommand = fixture.commands.find((command) => command.type === "message.post");
+    if (!postCommand) throw new Error("Expected message post command");
+
+    act(() => fixture.disconnect());
+    const notificationsAfterDisconnect = storeListener.mock.calls.length;
+    await act(async () => pending.resolve(successRendererResponse(
+      postCommand,
+      messageEvent("Draft survives stale success")
+    )));
+
+    await waitFor(() => expect(screen.getByText("Message was not sent. Try again.")).toBeTruthy());
+    expect(input.value).toBe("Draft survives stale success");
+    expect(store.getState()).toMatchObject({ connection: "reconnecting", error: null });
+    expect(storeListener).toHaveBeenCalledTimes(notificationsAfterDisconnect);
+    expect(fixture.commands.filter((command) => command.type === "message.post")).toEqual([
+      postCommand
+    ]);
+  });
+
+  it("retains the real-store draft when an old post rejects after disconnect", async () => {
+    const user = userEvent.setup();
+    const pending = deferred<WorkerResponseEnvelope>();
+    const fixture = realRendererApi(() => pending.promise);
+    let id = 0;
+    const store = createTimelineStore(fixture.api, () => (
+      `70000000-0000-4000-8000-${String(++id).padStart(12, "0")}`
+    ));
+    const storeListener = vi.fn();
+    store.subscribe(storeListener);
+    render(<App store={store} />);
+    const input = screen.getByTestId("message-input") as HTMLTextAreaElement;
+    await waitFor(() => expect(input.disabled).toBe(false));
+    await user.type(input, "Draft survives stale rejection");
+    await user.click(screen.getByTestId("send-message"));
+    await waitFor(() => expect(
+      fixture.commands.filter((command) => command.type === "message.post")
+    ).toHaveLength(1));
+    const postCommand = fixture.commands.find((command) => command.type === "message.post");
+    if (!postCommand) throw new Error("Expected message post command");
+
+    act(() => fixture.disconnect());
+    const notificationsAfterDisconnect = storeListener.mock.calls.length;
+    await act(async () => pending.reject(new Error("old worker failed")));
+
+    await waitFor(() => expect(screen.getByText("Message was not sent. Try again.")).toBeTruthy());
+    expect(input.value).toBe("Draft survives stale rejection");
+    expect(store.getState()).toMatchObject({ connection: "reconnecting", error: null });
+    expect(storeListener).toHaveBeenCalledTimes(notificationsAfterDisconnect);
+    expect(fixture.commands.filter((command) => command.type === "message.post")).toEqual([
+      postCommand
+    ]);
   });
 
   it("disables message entry and submission when no connected room is available", () => {
