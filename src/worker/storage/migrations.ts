@@ -1,5 +1,156 @@
 import type { Database } from "./database";
 
+export const TASK_ENGINE_SCHEMA_SQL = `
+  CREATE TABLE tasks (
+    id TEXT PRIMARY KEY,
+    room_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE RESTRICT,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+    request_event_id TEXT NOT NULL UNIQUE,
+    request_text TEXT NOT NULL,
+    lead_provider TEXT NOT NULL CHECK (lead_provider IN ('claude','codex')),
+    target_ref TEXT NOT NULL,
+    base_oid TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN (
+      'AwaitingApproval','Preparing','Working','Checkpoint','Review1','Revision','Review2',
+      'Candidate','HumanApproval','Merging','CancelRequested','Interrupted','Reconciling',
+      'Completed','Cancelled','Failed'
+    )),
+    interrupted_from_state TEXT,
+    collaboration_rounds_used INTEGER NOT NULL DEFAULT 0 CHECK (collaboration_rounds_used >= 0),
+    collaboration_round_budget INTEGER NOT NULL DEFAULT 2 CHECK (collaboration_round_budget >= 0),
+    human_revision_count INTEGER NOT NULL DEFAULT 0 CHECK (human_revision_count >= 0),
+    revision_kind TEXT CHECK (revision_kind IS NULL OR revision_kind IN ('agent_review','human_directed')),
+    scope_approval_id TEXT,
+    active_candidate_id TEXT,
+    failure_code TEXT,
+    failure_message TEXT,
+    version INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+
+  CREATE TABLE approval_requests (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE RESTRICT,
+    kind TEXT NOT NULL CHECK (kind IN ('task_scope','additional_round','external_operation','final_merge')),
+    scope_json TEXT NOT NULL,
+    scope_hash TEXT NOT NULL,
+    requested_generation TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('pending','decided')),
+    requested_at TEXT NOT NULL
+  );
+
+  CREATE TABLE approvals (
+    id TEXT PRIMARY KEY,
+    request_id TEXT NOT NULL UNIQUE REFERENCES approval_requests(id) ON DELETE RESTRICT,
+    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE RESTRICT,
+    kind TEXT NOT NULL CHECK (kind IN ('task_scope','additional_round','external_operation','final_merge')),
+    decision TEXT NOT NULL CHECK (decision IN ('approved','rejected')),
+    scope_json TEXT NOT NULL,
+    scope_hash TEXT NOT NULL,
+    worker_generation TEXT NOT NULL,
+    survives_worker_restart INTEGER NOT NULL CHECK (survives_worker_restart IN (0,1)),
+    decided_at TEXT NOT NULL
+  );
+  CREATE UNIQUE INDEX approvals_scope_once ON approvals(task_id, kind, scope_hash, decision);
+
+  CREATE TABLE agent_runs (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE RESTRICT,
+    provider TEXT NOT NULL CHECK (provider IN ('claude','codex')),
+    role TEXT NOT NULL CHECK (role IN ('lead','collaborator','reviewer')),
+    provider_session_id TEXT,
+    context_version INTEGER NOT NULL,
+    context_hash TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('starting','running','completed','cancelled','failed','interrupted')),
+    started_at TEXT NOT NULL,
+    finished_at TEXT
+  );
+
+  CREATE TABLE worktrees (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE RESTRICT,
+    role TEXT NOT NULL CHECK (role IN ('lead','collaborator')),
+    path_realpath TEXT NOT NULL UNIQUE,
+    branch_ref TEXT NOT NULL UNIQUE,
+    base_oid TEXT NOT NULL,
+    current_checkpoint_oid TEXT,
+    retained INTEGER NOT NULL DEFAULT 1 CHECK (retained = 1),
+    created_at TEXT NOT NULL,
+    UNIQUE(task_id, role)
+  );
+
+  CREATE TABLE checkpoints (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE RESTRICT,
+    worktree_id TEXT NOT NULL REFERENCES worktrees(id) ON DELETE RESTRICT,
+    author_provider TEXT NOT NULL CHECK (author_provider IN ('claude','codex')),
+    purpose TEXT NOT NULL CHECK (purpose IN ('implementation','review','revision','candidate')),
+    oid TEXT NOT NULL,
+    immutable_ref TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL
+  );
+  CREATE TRIGGER checkpoints_oid_immutable
+  BEFORE UPDATE OF oid, immutable_ref ON checkpoints
+  BEGIN SELECT RAISE(ABORT, 'CHECKPOINT_IMMUTABLE'); END;
+
+  CREATE TABLE test_results (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE RESTRICT,
+    candidate_id TEXT NOT NULL,
+    command_id TEXT NOT NULL,
+    executable_realpath TEXT NOT NULL,
+    argv_json TEXT NOT NULL,
+    exit_code INTEGER NOT NULL,
+    stdout_hash TEXT NOT NULL,
+    stderr_hash TEXT NOT NULL,
+    duration_ms INTEGER NOT NULL,
+    log_reference TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(candidate_id, command_id)
+  );
+
+  CREATE TABLE integration_candidates (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE RESTRICT,
+    lead_worktree_id TEXT NOT NULL REFERENCES worktrees(id) ON DELETE RESTRICT,
+    target_ref TEXT NOT NULL,
+    base_oid TEXT NOT NULL,
+    candidate_oid TEXT NOT NULL,
+    immutable_ref TEXT NOT NULL UNIQUE,
+    diff_hash TEXT NOT NULL,
+    test_set_hash TEXT NOT NULL,
+    diff_summary_json TEXT NOT NULL,
+    unresolved_json TEXT NOT NULL,
+    verification_status TEXT NOT NULL CHECK (verification_status IN ('passed','failed')),
+    created_at TEXT NOT NULL
+  );
+
+  CREATE TABLE candidate_checkpoints (
+    candidate_id TEXT NOT NULL REFERENCES integration_candidates(id) ON DELETE RESTRICT,
+    checkpoint_id TEXT NOT NULL REFERENCES checkpoints(id) ON DELETE RESTRICT,
+    ordinal INTEGER NOT NULL,
+    PRIMARY KEY(candidate_id, checkpoint_id),
+    UNIQUE(candidate_id, ordinal)
+  );
+
+  CREATE TABLE operation_journal (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+    task_id TEXT REFERENCES tasks(id) ON DELETE RESTRICT,
+    repository_common_dir_realpath TEXT NOT NULL,
+    operation_type TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL UNIQUE,
+    expected_json TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('intent','executing','observed','completed','needs_attention')),
+    observation_json TEXT,
+    worker_generation TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX operation_journal_incomplete ON operation_journal(project_id, status);
+`;
+
 const migrations = [{
   version: 1,
   sql: `
@@ -49,6 +200,9 @@ const migrations = [{
       heartbeat_ms INTEGER NOT NULL
     );
   `
+}, {
+  version: 2,
+  sql: TASK_ENGINE_SCHEMA_SQL
 }] as const;
 
 export function runMigrations(database: Database): void {

@@ -115,7 +115,7 @@ afterEach(() => {
 });
 
 describe("worker database", () => {
-  it("enables WAL and foreign keys and migrates exactly once", () => {
+  it("enables WAL and foreign keys and applies each migration exactly once", () => {
     const root = mkdtempSync(join(tmpdir(), "branchestra-db-"));
     roots.push(root);
     const database = openDatabase(join(root, "branchestra.sqlite3"));
@@ -124,7 +124,7 @@ describe("worker database", () => {
 
     expect(database.prepare("PRAGMA journal_mode").get()).toMatchObject({ journal_mode: "wal" });
     expect(database.prepare("PRAGMA foreign_keys").get()).toMatchObject({ foreign_keys: 1 });
-    expect(database.prepare("SELECT count(*) AS count FROM schema_migrations").get()).toEqual({ count: 1 });
+    expect(database.prepare("SELECT count(*) AS count FROM schema_migrations").get()).toEqual({ count: 2 });
     const tables = database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all();
     expect(tables).toEqual(expect.arrayContaining([
       { name: "idempotency_records" },
@@ -132,6 +132,7 @@ describe("worker database", () => {
       { name: "room_events" },
       { name: "rooms" },
       { name: "schema_migrations" },
+      { name: "tasks" },
       { name: "worker_leases" }
     ]));
     database.close();
@@ -235,7 +236,7 @@ describe("worker database", () => {
     ])).resolves.toEqual([undefined, undefined]);
 
     const database = openDatabase(filePath);
-    expect(database.prepare("SELECT count(*) AS count FROM schema_migrations").get()).toEqual({ count: 1 });
+    expect(database.prepare("SELECT count(*) AS count FROM schema_migrations").get()).toEqual({ count: 2 });
     database.close();
   });
 });

@@ -10,7 +10,7 @@ import {
 import { runMigrations } from "../../src/worker/storage/migrations";
 import {
   createRepositories,
-  type DomainRepositories
+  type EventStoreRepositories
 } from "../../src/worker/storage/repositories";
 import type { Database } from "../../src/worker/storage/database";
 import { MAX_IPC_BYTES, assertEnvelopeSize } from "../../src/shared/contracts/protocol";
@@ -113,7 +113,7 @@ describe("event storage", () => {
         },
         close: database.close.bind(database)
       };
-      const trackedRepositories: DomainRepositories = {
+      const trackedRepositories: EventStoreRepositories = {
         projects: baseRepositories.projects,
         rooms: {
           ...baseRepositories.rooms,
