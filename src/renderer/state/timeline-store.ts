@@ -64,8 +64,12 @@ export function createTimelineStore(
   let lifecycleEpoch = 0;
   let statusSequence = 0;
   let publishedStatusSequence = 0;
-  let hydrateTask: { epoch: number; promise: Promise<void> } | null = null;
-  let refreshTail: { epoch: number; promise: Promise<void> } | null = null;
+  let hydrateTask: {
+    epoch: number;
+    statusOperation: number;
+    promise: Promise<void>;
+  } | null = null;
+  let refreshTail: { epoch: number; started: boolean; promise: Promise<void> } | null = null;
   let workerGeneration: string | null = null;
   let workerReady = false;
   let hasHydrated = false;
@@ -257,8 +261,7 @@ export function createTimelineStore(
     }
   });
 
-  async function runHydrate(epoch: number): Promise<void> {
-    const statusOperation = beginStatusOperation();
+  async function runHydrate(epoch: number, statusOperation: number): Promise<void> {
     patchStatus(epoch, statusOperation, {
       connection: hasHydrated ? "reconnecting" : "bootstrapping",
       error: null
@@ -301,8 +304,12 @@ export function createTimelineStore(
   function hydrateForEpoch(epoch: number, force = false): Promise<void> {
     if (!isCurrent(epoch)) return Promise.resolve();
     if (!force && hydrateTask?.epoch === epoch) return hydrateTask.promise;
-    const task = { epoch, promise: Promise.resolve() };
-    task.promise = runHydrate(epoch).finally(() => {
+    const task = {
+      epoch,
+      statusOperation: beginStatusOperation(),
+      promise: Promise.resolve()
+    };
+    task.promise = runHydrate(epoch, task.statusOperation).finally(() => {
       if (hydrateTask === task) hydrateTask = null;
     });
     hydrateTask = task;
@@ -310,6 +317,15 @@ export function createTimelineStore(
   }
 
   function hydrate(): Promise<void> {
+    if (disposed) return Promise.resolve();
+    const epoch = lifecycleEpoch;
+    const active = hydrateTask?.epoch === epoch ? hydrateTask : null;
+    if (active) {
+      if (active.statusOperation >= publishedStatusSequence) return active.promise;
+      if (refreshTail?.epoch === epoch && !refreshTail.started) return refreshTail.promise;
+      return forceFreshHydrate(epoch);
+    }
+    if (refreshTail?.epoch === epoch) return refreshTail.promise;
     return hydrateForEpoch(lifecycleEpoch);
   }
 
@@ -318,11 +334,12 @@ export function createTimelineStore(
     const predecessor = refreshTail?.epoch === epoch
       ? refreshTail.promise
       : Promise.resolve();
-    const refresh = { epoch, promise: Promise.resolve() };
+    const refresh = { epoch, started: false, promise: Promise.resolve() };
     refresh.promise = predecessor.then(async () => {
       const active = hydrateTask;
       if (active?.epoch === epoch) await active.promise;
       if (!isCurrent(epoch)) return;
+      refresh.started = true;
       await hydrateForEpoch(epoch, true);
     }).finally(() => {
       if (refreshTail === refresh) refreshTail = null;

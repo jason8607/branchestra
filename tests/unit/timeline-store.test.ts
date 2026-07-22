@@ -1167,4 +1167,55 @@ describe("timeline store", () => {
     });
     expect(store.getState().eventsByRoom).toEqual({});
   });
+
+  it("queues a fresh recovery hydrate when a newer error supersedes the active hydrate", async () => {
+    const roomTwo = room("20000000-0000-4000-8000-000000000002");
+    const oldRoomReplay = deferred<WorkerResponseEnvelope>();
+    let snapshotRequests = 0;
+    let roomTwoReplays = 0;
+    const fixture = apiHarness((command) => {
+      if (command.type === "state.getSnapshot") {
+        snapshotRequests += 1;
+        return successResponse(command, {
+          projects: [project()],
+          rooms: [room(), roomTwo],
+          roomCursors: { [ROOM_ID]: 0, [roomTwo.id]: 0 }
+        });
+      }
+      if (command.type === "room.replay" && command.payload.roomId === ROOM_ID) {
+        return oldRoomReplay.promise;
+      }
+      if (command.type === "room.replay") {
+        roomTwoReplays += 1;
+        if (roomTwoReplays === 1) return failureResponse(command, "Room B replay failed");
+        return successResponse(command, {
+          roomId: roomTwo.id,
+          events: [],
+          nextRoomSeq: 0,
+          hasMore: false
+        });
+      }
+      throw new Error(`Unexpected command: ${command.type}`);
+    });
+    const store = createTimelineStore(fixture.api, sequentialIds());
+    const oldHydration = store.hydrate();
+    for (let turn = 0; turn < 5; turn += 1) await Promise.resolve();
+    await expect(store.selectRoom(roomTwo.id)).rejects.toThrow("Room B replay failed");
+
+    const recovery = store.hydrate();
+    const oldReplayCommand = fixture.commands.find((command) => (
+      command.type === "room.replay" && command.payload.roomId === ROOM_ID
+    ));
+    if (!oldReplayCommand) throw new Error("Expected older Room A replay");
+    oldRoomReplay.resolve(successResponse(oldReplayCommand, eventPage([], false)));
+    await Promise.all([oldHydration, recovery]);
+
+    expect(snapshotRequests).toBe(2);
+    expect(roomTwoReplays).toBe(2);
+    expect(store.getState()).toMatchObject({
+      connection: "ready",
+      error: null,
+      selectedRoomId: roomTwo.id
+    });
+  });
 });
