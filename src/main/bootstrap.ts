@@ -2,7 +2,11 @@ import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { app, BrowserWindow, ipcMain } from "electron";
-import { createElectronProjectDialog } from "./dialog/project-dialog";
+import {
+  createElectronProjectDialog,
+  createFixedProjectDialog,
+  type ProjectDialogAdapter
+} from "./dialog/project-dialog";
 import { registerRendererGateway } from "./ipc/renderer-gateway";
 import { installApplicationLifecycle } from "./lifecycle";
 import { createWindowOptions } from "./window-options";
@@ -16,6 +20,34 @@ export interface BootstrapPaths {
   rendererEntry: string;
 }
 
+export interface E2EEnvironment {
+  userDataPath: string;
+  projectPath: string;
+}
+
+const e2eEnvironmentNames = [
+  "BRANCHESTRA_E2E",
+  "BRANCHESTRA_E2E_USER_DATA",
+  "BRANCHESTRA_E2E_PROJECT_PATH"
+] as const;
+
+export function resolveE2EEnvironment(
+  environment: Readonly<Record<string, string | undefined>>
+): E2EEnvironment | null {
+  if (environment.BRANCHESTRA_E2E !== "1") return null;
+  const userDataPath = environment.BRANCHESTRA_E2E_USER_DATA;
+  const projectPath = environment.BRANCHESTRA_E2E_PROJECT_PATH;
+  if (
+    userDataPath === undefined
+    || userDataPath.trim().length === 0
+    || projectPath === undefined
+    || projectPath.trim().length === 0
+  ) {
+    throw new Error("E2E requires nonempty user-data and project paths");
+  }
+  return { userDataPath, projectPath };
+}
+
 export function resolveBootstrapPaths(mainModuleUrl: string, userDataPath: string): BootstrapPaths {
   const mainDirectory = dirname(fileURLToPath(mainModuleUrl));
   return {
@@ -27,6 +59,15 @@ export function resolveBootstrapPaths(mainModuleUrl: string, userDataPath: strin
 }
 
 export function bootstrapMain(): void {
+  const e2eEnvironment = resolveE2EEnvironment(process.env);
+  for (const name of e2eEnvironmentNames) delete process.env[name];
+  let projectDialog: ProjectDialogAdapter;
+  if (e2eEnvironment === null) {
+    projectDialog = createElectronProjectDialog();
+  } else {
+    app.setPath("userData", e2eEnvironment.userDataPath);
+    projectDialog = createFixedProjectDialog(e2eEnvironment.projectPath);
+  }
   const paths = resolveBootstrapPaths(import.meta.url, app.getPath("userData"));
   const supervisor = createWorkerSupervisor({
     utilityProcess: electronUtilityProcessAdapter,
@@ -49,7 +90,7 @@ export function bootstrapMain(): void {
       ipcMain,
       trustedWebContents: created.webContents,
       parentWindow: created,
-      dialog: createElectronProjectDialog(),
+      dialog: projectDialog,
       supervisor
     });
     created.webContents.setWindowOpenHandler(() => ({ action: "deny" }));

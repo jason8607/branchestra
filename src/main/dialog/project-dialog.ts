@@ -16,3 +16,8 @@ export function createElectronProjectDialog(): ProjectDialogAdapter {
     }
   };
 }
+
+export function createFixedProjectDialog(selectedPath: string): ProjectDialogAdapter {
+  if (selectedPath.length === 0) throw new Error("E2E project path is empty");
+  return { pickExistingProject: async () => selectedPath };
+}
