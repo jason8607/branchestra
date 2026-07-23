@@ -1,5 +1,6 @@
 import type { ApprovalReceipt, ApprovalRequest } from "../../shared/contracts/domain";
 import type { Database } from "../storage/database";
+import { canonicalJson } from "./canonical-json";
 
 interface ApprovalRequestRow {
   id: string;
@@ -35,14 +36,6 @@ const APPROVAL_COLUMNS = [
   "worker_generation", "survives_worker_restart", "decided_at"
 ].join(", ");
 
-function canonicalJson(value: unknown): string {
-  if (value === null || typeof value !== "object") return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
-  const entries = Object.entries(value as Record<string, unknown>)
-    .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0);
-  return `{${entries.map(([key, child]) => `${JSON.stringify(key)}:${canonicalJson(child)}`).join(",")}}`;
-}
-
 function mapRequest(row: ApprovalRequestRow): ApprovalRequest {
   return {
     id: row.id,
@@ -72,7 +65,7 @@ function mapApproval(row: ApprovalRow): ApprovalReceipt {
 }
 
 function assertRestartSurvival(receipt: ApprovalReceipt): void {
-  if (receipt.kind !== "task_scope" && receipt.survivesWorkerRestart) {
+  if ((receipt.kind === "task_scope") !== receipt.survivesWorkerRestart) {
     throw new Error(`APPROVAL_RESTART_SURVIVAL_INVALID:${receipt.kind}`);
   }
 }

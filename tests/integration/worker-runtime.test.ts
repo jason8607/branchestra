@@ -13,6 +13,7 @@ import { createWorkerLeaseStore, type WorkerIdentity } from "../../src/worker/st
 import { startWorker, type WorkerPort } from "../../src/worker/runtime";
 import { runMigrations } from "../../src/worker/storage/migrations";
 import { createRepositories } from "../../src/worker/storage/repositories";
+import { createGitRepository } from "../fixtures/git-repository";
 
 interface FakePort extends WorkerPort {
   sent: unknown[];
@@ -74,6 +75,16 @@ function prepareQuitRequest(generation: string) {
 
 async function flushMessages(): Promise<void> {
   await new Promise<void>((resolve) => setImmediate(resolve));
+}
+
+async function waitForResponses(port: FakePort, count: number): Promise<void> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    const responses = port.sent.filter(
+      (value) => WorkerResponseEnvelopeSchema.safeParse(value).success
+    );
+    if (responses.length >= count) return;
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  }
 }
 
 describe("worker runtime lease", () => {
@@ -421,6 +432,106 @@ describe("worker runtime lease", () => {
     } finally {
       seedDatabase?.close();
       await runtime?.prepareQuit(Date.now() + 1_000);
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("routes a mentioned message into one durable pending task on the canonical runtime", async () => {
+    const root = mkdtempSync(join(tmpdir(), "branchestra-worker-task-"));
+    const repository = createGitRepository();
+    const dbPath = join(root, "branchestra.sqlite3");
+    const generation = "50000000-0000-4000-8000-000000000080";
+    const projectId = "20000000-0000-4000-8000-000000000080";
+    const roomId = "30000000-0000-4000-8000-000000000080";
+    const message = WorkerRequestEnvelopeSchema.parse({
+      v: 1,
+      requestId: "10000000-0000-4000-8000-000000000080",
+      idempotencyKey: "message-post-80",
+      workerGeneration: generation,
+      type: "message.post",
+      payload: {
+        roomId,
+        body: "@Claude implement parser",
+        leadProvider: "claude",
+        commandClasses: ["test", "lint"],
+        allowCollaborator: true,
+        toolNetwork: false,
+        maxRunMs: 120_000,
+        collaborationRoundBudget: 2
+      }
+    });
+    let runtime: Awaited<ReturnType<typeof startWorker>> | undefined;
+    let database: ReturnType<typeof openDatabase> | undefined;
+    try {
+      database = openDatabase(dbPath);
+      runMigrations(database);
+      const seeded = createRepositories(database);
+      seeded.projects.insert({
+        id: projectId,
+        repositoryRoot: repository.root,
+        gitCommonDir: repository.commonDirRealpath,
+        displayName: "runtime-task-repository",
+        headOid: repository.initialOid,
+        defaultBranch: "main",
+        createdAt: "2026-07-24T00:00:00.000Z"
+      });
+      seeded.rooms.insert({
+        id: roomId,
+        projectId,
+        title: "Runtime task room",
+        createdAt: "2026-07-24T00:00:00.000Z"
+      });
+      database.close();
+      database = undefined;
+
+      const port = fakePort();
+      runtime = await startWorker(startOptions(dbPath, port, generation, 180));
+      port.emit(message);
+      await waitForResponses(port, 1);
+      const response = port.sent.flatMap((value) => {
+        const parsed = WorkerResponseEnvelopeSchema.safeParse(value);
+        return parsed.success ? [parsed.data] : [];
+      }).at(-1);
+      expect(response?.payload).toMatchObject({
+        ok: true,
+        requestType: "message.post",
+        replayed: false
+      });
+
+      port.emit({ ...message, requestId: "10000000-0000-4000-8000-000000000081" });
+      await waitForResponses(port, 2);
+      await runtime.prepareQuit(Date.now() + 1_000);
+      runtime = undefined;
+
+      database = openDatabase(dbPath);
+      const persisted = createRepositories(database);
+      const tasks = persisted.tasks.listNonTerminal();
+      expect(tasks).toHaveLength(1);
+      expect(tasks[0]).toMatchObject({
+        roomId,
+        leadProvider: "claude",
+        state: "AwaitingApproval",
+        baseOid: repository.initialOid
+      });
+      expect(persisted.approvals.getPendingRequest(tasks[0]!.id)).toMatchObject({
+        kind: "task_scope",
+        scope: {
+          commandClasses: ["lint", "test"],
+          toolNetwork: false,
+          collaborationRoundBudget: 2
+        }
+      });
+      expect(persisted.approvals.listForTask(tasks[0]!.id)).toEqual([]);
+      expect(database.prepare(
+        "SELECT event_type, count(*) AS count FROM room_events WHERE event_type IN ('task.created','approval.requested') GROUP BY event_type ORDER BY event_type"
+      ).all()).toEqual([
+        { event_type: "approval.requested", count: 1 },
+        { event_type: "task.created", count: 1 }
+      ]);
+    } finally {
+      database?.close();
+      await runtime?.prepareQuit(Date.now() + 1_000);
+      repository.cleanup();
       rmSync(root, { recursive: true, force: true });
     }
   });

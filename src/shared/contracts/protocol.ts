@@ -6,7 +6,8 @@ import {
   RoomEventPageSchema,
   RoomEventSchema,
   RoomSchema,
-  SnapshotPageSchema
+  SnapshotPageSchema,
+  TaskRecordSchema
 } from "./domain";
 import type { FinalApprovalTuple } from "./domain";
 
@@ -29,7 +30,16 @@ const snapshotPageRequest = z.object({
 }).strict();
 const snapshotRequest = z.union([empty, snapshotPageRequest]);
 const roomCreate = z.object({ projectId: UuidSchema, title: z.string().trim().min(1).max(120) }).strict();
-const messagePost = z.object({ roomId: UuidSchema, body: z.string().trim().min(1).max(20_000) }).strict();
+const messagePost = z.object({
+  roomId: UuidSchema,
+  body: z.string().trim().min(1).max(20_000),
+  leadProvider: z.enum(["claude", "codex"]).optional(),
+  commandClasses: z.array(z.enum(["build", "test", "lint", "format"])).optional(),
+  allowCollaborator: z.boolean().optional(),
+  toolNetwork: z.boolean().optional(),
+  maxRunMs: z.number().int().min(1).max(3_600_000).optional(),
+  collaborationRoundBudget: z.union([z.literal(0), z.literal(1), z.literal(2)]).optional()
+}).strict();
 const TaskIdSchema = z.string().min(1);
 const ApprovalRequestIdSchema = z.string().min(1);
 const ScopeHashSchema = z.string().regex(/^sha256:.+/);
@@ -83,10 +93,12 @@ export const WorkerRequestEnvelopeSchema = z.discriminatedUnion("type", [
   z.object({ ...base, type: z.literal("project.addExisting"), payload: z.object({ selectedPath: z.string().min(1) }).strict() }).strict(),
   z.object({ ...base, type: z.literal("room.create"), payload: roomCreate }).strict(),
   z.object({ ...base, type: z.literal("message.post"), payload: messagePost }).strict(),
+  z.object({ ...base, type: z.literal("task.approveScope"), payload: taskApproveScope }).strict(),
+  z.object({ ...base, type: z.literal("task.grantAdditionalRound"), payload: taskGrantAdditionalRound }).strict(),
   z.object({ ...base, type: z.literal("worker.prepareQuit"), payload: z.object({ deadlineMs: z.number().int().positive() }).strict() }).strict()
 ]);
 
-const responseData = z.union([AppSnapshotSchema, SnapshotPageSchema, RoomEventPageSchema, ProjectSchema, RoomSchema, RoomEventSchema, z.object({ cancelled: z.literal(true) }).strict(), z.object({ prepared: z.literal(true) }).strict()]);
+const responseData = z.union([AppSnapshotSchema, SnapshotPageSchema, RoomEventPageSchema, ProjectSchema, RoomSchema, RoomEventSchema, TaskRecordSchema, z.object({ cancelled: z.literal(true) }).strict(), z.object({ prepared: z.literal(true) }).strict()]);
 export const WorkerResponseEnvelopeSchema = z.object({
   ...base,
   type: z.literal("response"),

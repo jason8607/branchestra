@@ -194,7 +194,7 @@ export interface TaskInspectorModel {
 
 const TaskStateSchema = z.enum(TASK_STATES);
 const NonTerminalTaskStateSchema = z.enum(NON_TERMINAL_TASK_STATES);
-const TaskCapabilityScopeSchema = z.object({
+export const TaskCapabilityScopeSchema = z.object({
   repositoryRootRealpath: z.string().min(1), gitCommonDirRealpath: z.string().min(1),
   writableRootsRealpath: z.array(z.string().min(1)), commandClasses: z.array(z.enum(["build", "test", "lint", "format"])),
   allowCollaborator: z.boolean(), toolNetwork: z.boolean(), maxRunMs: z.number().int().positive(),
@@ -211,19 +211,19 @@ const approvalScopeBranches = {
   external_operation: z.object({ operation: z.string().min(1) }).strict(),
   final_merge: FinalApprovalTupleSchema
 } as const;
-const ApprovalReceiptSchema = z.discriminatedUnion("kind", [
+export const ApprovalReceiptSchema = z.discriminatedUnion("kind", [
   z.object({ id: z.string().min(1), requestId: z.string().min(1), taskId: z.string().min(1), kind: z.literal("task_scope"), scope: approvalScopeBranches.task_scope, decision: z.enum(["approved", "rejected"]), scopeHash: Sha256Schema, workerGeneration: z.string().min(1), survivesWorkerRestart: z.boolean(), decidedAt: TimestampSchema }).strict(),
   z.object({ id: z.string().min(1), requestId: z.string().min(1), taskId: z.string().min(1), kind: z.literal("additional_round"), scope: approvalScopeBranches.additional_round, decision: z.enum(["approved", "rejected"]), scopeHash: Sha256Schema, workerGeneration: z.string().min(1), survivesWorkerRestart: z.boolean(), decidedAt: TimestampSchema }).strict(),
   z.object({ id: z.string().min(1), requestId: z.string().min(1), taskId: z.string().min(1), kind: z.literal("external_operation"), scope: approvalScopeBranches.external_operation, decision: z.enum(["approved", "rejected"]), scopeHash: Sha256Schema, workerGeneration: z.string().min(1), survivesWorkerRestart: z.boolean(), decidedAt: TimestampSchema }).strict(),
   z.object({ id: z.string().min(1), requestId: z.string().min(1), taskId: z.string().min(1), kind: z.literal("final_merge"), scope: approvalScopeBranches.final_merge, decision: z.enum(["approved", "rejected"]), scopeHash: Sha256Schema, workerGeneration: z.string().min(1), survivesWorkerRestart: z.boolean(), decidedAt: TimestampSchema }).strict()
 ]);
-const ApprovalRequestSchema = z.discriminatedUnion("kind", [
+export const ApprovalRequestSchema = z.discriminatedUnion("kind", [
   z.object({ id: z.string().min(1), taskId: z.string().min(1), kind: z.literal("task_scope"), scope: approvalScopeBranches.task_scope, scopeHash: Sha256Schema, requestedGeneration: z.string().min(1), status: z.enum(["pending", "decided"]), requestedAt: TimestampSchema }).strict(),
   z.object({ id: z.string().min(1), taskId: z.string().min(1), kind: z.literal("additional_round"), scope: approvalScopeBranches.additional_round, scopeHash: Sha256Schema, requestedGeneration: z.string().min(1), status: z.enum(["pending", "decided"]), requestedAt: TimestampSchema }).strict(),
   z.object({ id: z.string().min(1), taskId: z.string().min(1), kind: z.literal("external_operation"), scope: approvalScopeBranches.external_operation, scopeHash: Sha256Schema, requestedGeneration: z.string().min(1), status: z.enum(["pending", "decided"]), requestedAt: TimestampSchema }).strict(),
   z.object({ id: z.string().min(1), taskId: z.string().min(1), kind: z.literal("final_merge"), scope: approvalScopeBranches.final_merge, scopeHash: Sha256Schema, requestedGeneration: z.string().min(1), status: z.enum(["pending", "decided"]), requestedAt: TimestampSchema }).strict()
 ]);
-const TaskRecordSchema = z.object({
+export const TaskRecordSchema = z.object({
   id: z.string().min(1), roomId: z.string().min(1), projectId: z.string().min(1), requestEventId: z.string().min(1),
   requestText: z.string(), leadProvider: z.enum(["claude", "codex"]), targetRef: TargetRefSchema, baseOid: GitOidSchema,
   state: TaskStateSchema, interruptedFromState: NonTerminalTaskStateSchema.nullable(),

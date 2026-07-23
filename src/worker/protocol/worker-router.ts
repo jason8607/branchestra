@@ -6,6 +6,7 @@ import {
 } from "../../shared/contracts/protocol";
 import { NotFoundError } from "../domain/errors";
 import { GitRepositoryError } from "../git/inspect-repository";
+import { GitReadError } from "../git/repository-inspector";
 import { IdempotencyConflictError } from "../storage/idempotency-store";
 import {
   createCommandContext,
@@ -65,7 +66,9 @@ export function createWorkerRouter(options: {
       });
     } catch (error) {
       if (error instanceof IdempotencyConflictError) return fail("IDEMPOTENCY_CONFLICT", error.message);
-      if (error instanceof GitRepositoryError) return fail("GIT_INVALID", error.message);
+      if (error instanceof GitRepositoryError || error instanceof GitReadError) {
+        return fail("GIT_INVALID", error.message);
+      }
       if (error instanceof NotFoundError) {
         return fail("NOT_FOUND", error.message);
       }
@@ -85,6 +88,10 @@ function commandFromEnvelope(envelope: WorkerRequestEnvelope): WorkerCommand {
     case "room.create":
       return { type: envelope.type, payload: envelope.payload };
     case "message.post":
+      return { type: envelope.type, payload: envelope.payload };
+    case "task.approveScope":
+      return { type: envelope.type, payload: envelope.payload };
+    case "task.grantAdditionalRound":
       return { type: envelope.type, payload: envelope.payload };
     case "worker.prepareQuit":
       return { type: envelope.type, payload: envelope.payload };

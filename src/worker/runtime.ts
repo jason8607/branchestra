@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { dirname, resolve } from "node:path";
 import { z } from "zod";
 import { RoomEventSchema } from "../shared/contracts/domain";
 import {
@@ -12,6 +13,8 @@ import {
 import { createProjectService } from "./domain/project-service";
 import { createRoomService } from "./domain/room-service";
 import { inspectExistingRepository } from "./git/inspect-repository";
+import { GitCommandRunner } from "./git/git-command-runner";
+import { GitReadService } from "./git/repository-inspector";
 import { createCommandHandlers } from "./protocol/handlers";
 import { createWorkerRouter } from "./protocol/worker-router";
 import { openDatabase } from "./storage/database";
@@ -20,6 +23,7 @@ import { createIdempotencyStore } from "./storage/idempotency-store";
 import { runMigrations } from "./storage/migrations";
 import { createRepositories } from "./storage/repositories";
 import { createWorkerLeaseStore, type WorkerIdentity } from "./storage/worker-lease-store";
+import { TaskService } from "./tasks/task-service";
 
 export interface WorkerPort {
   postMessage(value: unknown): void;
@@ -175,9 +179,24 @@ export async function startWorker(options: WorkerStartOptions): Promise<WorkerRu
       ids
     });
     const roomService = createRoomService({ repositories, eventStore, idempotencyStore, clock, ids });
+    const taskService = new TaskService({
+      repositories,
+      eventStore,
+      idempotencyStore,
+      gitReadService: new GitReadService(new GitCommandRunner()),
+      managedWorktreeRoot: resolve(dirname(options.dbPath), "managed-worktrees"),
+      workerGeneration: options.identity.workerGeneration,
+      id: ids.next,
+      now: clock.now
+    });
     const router = createWorkerRouter({
       workerGeneration: options.identity.workerGeneration,
-      handlers: createCommandHandlers({ projectService, roomService, prepareQuit: runtime.prepareQuit })
+      handlers: createCommandHandlers({
+        projectService,
+        roomService,
+        taskService,
+        prepareQuit: runtime.prepareQuit
+      })
     });
     const onMessage = (value: unknown): void => {
       void (async () => {

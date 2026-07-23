@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { RoomEventSchema } from "../../../src/shared/contracts/domain";
-import { RendererRequestEnvelopeSchema } from "../../../src/shared/contracts/protocol";
+import {
+  RendererRequestEnvelopeSchema,
+  WorkerRequestEnvelopeSchema,
+  WorkerResponseEnvelopeSchema
+} from "../../../src/shared/contracts/protocol";
 
 const base = {
   v: 1,
@@ -10,6 +14,82 @@ const base = {
 };
 
 describe("task protocol", () => {
+  it("carries explicit mention scope fields through the worker message command", () => {
+    const message = {
+      ...base,
+      type: "message.post",
+      payload: {
+        roomId: "33333333-3333-4333-8333-333333333333",
+        body: "@Claude implement parser",
+        leadProvider: "claude",
+        commandClasses: ["test", "lint"],
+        allowCollaborator: true,
+        toolNetwork: false,
+        maxRunMs: 120_000,
+        collaborationRoundBudget: 2
+      }
+    };
+    expect(RendererRequestEnvelopeSchema.safeParse(message).success).toBe(true);
+    expect(WorkerRequestEnvelopeSchema.safeParse(message).success).toBe(true);
+  });
+
+  it("accepts scope decisions and additional-round grants on the canonical worker path", () => {
+    expect(WorkerRequestEnvelopeSchema.safeParse({
+      ...base,
+      type: "task.approveScope",
+      payload: {
+        taskId: "task-1",
+        approvalRequestId: "request-1",
+        decision: "approved",
+        displayedScopeHash: "sha256:scope"
+      }
+    }).success).toBe(true);
+    expect(WorkerRequestEnvelopeSchema.safeParse({
+      ...base,
+      type: "task.grantAdditionalRound",
+      payload: {
+        taskId: "task-1",
+        approvalRequestId: "request-round",
+        additionalRounds: 1,
+        displayedScopeHash: "sha256:round"
+      }
+    }).success).toBe(true);
+  });
+
+  it("accepts task records as typed worker responses", () => {
+    expect(WorkerResponseEnvelopeSchema.safeParse({
+      ...base,
+      type: "response",
+      payload: {
+        ok: true,
+        requestType: "task.approveScope",
+        replayed: false,
+        data: {
+          id: "task-1",
+          roomId: "33333333-3333-4333-8333-333333333333",
+          projectId: "22222222-2222-4222-8222-222222222222",
+          requestEventId: "event-1",
+          requestText: "@Claude implement parser",
+          leadProvider: "claude",
+          targetRef: "refs/heads/main",
+          baseOid: "a".repeat(40),
+          state: "Preparing",
+          interruptedFromState: null,
+          collaborationRoundsUsed: 0,
+          collaborationRoundBudget: 2,
+          humanRevisionCount: 0,
+          revisionKind: null,
+          scopeApprovalId: "receipt-1",
+          activeCandidateId: null,
+          failure: null,
+          version: 2,
+          createdAt: "2026-07-24T10:00:00.000Z",
+          updatedAt: "2026-07-24T10:01:00.000Z"
+        }
+      }
+    }).success).toBe(true);
+  });
+
   it("accepts a typed final approval and rejects an incomplete tuple", () => {
     expect(RendererRequestEnvelopeSchema.safeParse({
       ...base, type: "task.approveFinalMerge", payload: {

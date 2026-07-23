@@ -84,6 +84,30 @@ function workerResponse(request: WorkerRequestEnvelope): WorkerResponseEnvelope 
           defaultBranch: "main",
           createdAt: "2026-07-21T00:00:00.000Z"
         };
+      case "task.approveScope":
+      case "task.grantAdditionalRound":
+        return {
+          id: request.payload.taskId,
+          roomId: "20000000-0000-4000-8000-000000000010",
+          projectId: "20000000-0000-4000-8000-000000000011",
+          requestEventId: "event-1",
+          requestText: "@Claude implement parser",
+          leadProvider: "claude" as const,
+          targetRef: "refs/heads/main",
+          baseOid: "a".repeat(40),
+          state: "Preparing" as const,
+          interruptedFromState: null,
+          collaborationRoundsUsed: 0,
+          collaborationRoundBudget: 2,
+          humanRevisionCount: 0,
+          revisionKind: null,
+          scopeApprovalId: "receipt-1",
+          activeCandidateId: null,
+          failure: null,
+          version: 2,
+          createdAt: "2026-07-21T00:00:00.000Z",
+          updatedAt: "2026-07-21T00:01:00.000Z"
+        };
       case "worker.prepareQuit":
         return { prepared: true as const };
     }
@@ -359,6 +383,18 @@ describe("renderer gateway", () => {
     ["message.post", {
       roomId: "20000000-0000-4000-8000-000000000001",
       body: "Hello"
+    }],
+    ["task.approveScope", {
+      taskId: "task-1",
+      approvalRequestId: "request-1",
+      decision: "approved",
+      displayedScopeHash: "sha256:scope"
+    }],
+    ["task.grantAdditionalRound", {
+      taskId: "task-1",
+      approvalRequestId: "request-round",
+      additionalRounds: 1,
+      displayedScopeHash: "sha256:round"
     }]
   ] as const)("maps only the explicit %s worker command", async (type, payload) => {
     const fixture = gatewayFixture({ selectedPath: null, senderId: 42 });
