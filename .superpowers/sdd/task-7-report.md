@@ -118,3 +118,9 @@ alone owns orchestration, repositories, ApprovedWorkspace, and GitManager; every
 Provider event is durable before publish; cancellation and failures never remove or rewrite
 Git artifacts; process loss performs no Provider restart/resume/cancel; sensitive incomplete
 operations never auto-replay; and no Milestone 3 SDK/CLI/executable enforcement was added.
+
+## Controller Verification
+
+After commit `6a2df01`, the controller used the temporary fixed-Node-24 wrapper only for the
+integration test's internal build subprocess and ran the full integration directory without
+exclusions: 13 files, 137 tests passed. The wrapper remained outside the repository.
