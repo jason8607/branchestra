@@ -266,3 +266,7 @@ The only full-integration failure remains the environment-owned
 launched Node 20 Corepack, attempted `https://registry.npmjs.org/pnpm/latest`, and failed
 with `ENOTFOUND`. No network access was requested. The direct Node 24 build passed; the
 controller can run the full integration directory with its fixed Node 24 wrapper.
+
+Controller verification after fix commit `c685ba3` used the temporary fixed-Node-24
+wrapper only for that internal build subprocess and ran the complete integration directory
+without exclusions: 11 files, 112 tests passed. The wrapper remained outside the repository.
