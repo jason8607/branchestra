@@ -170,6 +170,7 @@ export interface GitManagerFixtureOptions {
   repository?: GitRepositoryFixture;
   objectFormat?: "sha1" | "sha256";
   lock?: RepositoryLock;
+  beforeGitRun?(cwd: string, argv: readonly string[]): void | Promise<void>;
   afterGitRun?(cwd: string, argv: readonly string[]): void | Promise<void>;
 }
 
@@ -186,6 +187,7 @@ export interface GitManagerFixture {
   lock: RepositoryLock;
   managedWorktreeRoot: string;
   gitArgvHistory: Array<{ cwd: string; argv: readonly string[] }>;
+  createManager(): GitManager;
   insertTask(taskId: string): TaskRecord;
   cleanup(): Promise<void>;
 }
@@ -207,12 +209,14 @@ export async function createGitManagerFixture(
   const trackedGit = {
     async run(cwd: string, argv: readonly string[]) {
       gitArgvHistory.push({ cwd, argv: [...argv] });
+      await options.beforeGitRun?.(cwd, argv);
       const result = await realGit.run(cwd, argv);
       await options.afterGitRun?.(cwd, argv);
       return result;
     },
     async runBuffer(cwd: string, argv: readonly string[]) {
       gitArgvHistory.push({ cwd, argv: [...argv] });
+      await options.beforeGitRun?.(cwd, argv);
       const result = await realGit.runBuffer(cwd, argv);
       await options.afterGitRun?.(cwd, argv);
       return result;
@@ -264,7 +268,7 @@ export async function createGitManagerFixture(
   let timestampTick = 0;
   const now = () => `2026-07-24T10:00:${String(timestampTick++).padStart(2, "0")}.000Z`;
   const journal = repositories.operations;
-  const manager = new GitManager({
+  const createManager = () => new GitManager({
     git: trackedGit,
     readService: new GitReadService(trackedGit),
     artifacts,
@@ -277,6 +281,7 @@ export async function createGitManagerFixture(
     id: randomUUID,
     now
   });
+  const manager = createManager();
   let closed = false;
   return {
     repository,
@@ -291,6 +296,7 @@ export async function createGitManagerFixture(
     lock,
     managedWorktreeRoot,
     gitArgvHistory,
+    createManager,
     insertTask(taskId) {
       const inserted = makeTask(taskId);
       repositories.tasks.insert(inserted);

@@ -1,10 +1,21 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { WorktreeRecord } from "../../../src/shared/contracts/domain";
 import { createGitManagerFixture } from "../../fixtures/git-repository";
 
 const GENERATION = "00000000-0000-4000-8000-000000000001";
+
+async function exists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return false;
+    throw error;
+  }
+}
 
 describe("GitManager worktrees", () => {
   it("creates distinct Lead and Collaborator branches from the recorded base exactly once", async () => {
@@ -126,6 +137,94 @@ describe("GitManager worktrees", () => {
 
       await expect(fixture.repository.readAt(target, "keep.txt")).resolves.toBe("keep\n");
       expect(fixture.journal.getByIdempotencyKey("existing-directory")?.status).toBe("needs_attention");
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it("rejects an intermediate symlink escape before creating directories or launching Git", async () => {
+    const fixture = await createGitManagerFixture();
+    const outside = await mkdtemp(join(tmpdir(), "branchestra-symlink-outside-"));
+    try {
+      await symlink(outside, join(fixture.managedWorktreeRoot, fixture.project.id), "dir");
+
+      await expect(fixture.manager.ensureAgentWorktree({
+        projectId: fixture.project.id,
+        taskId: fixture.task.id,
+        role: "lead",
+        baseOid: fixture.repository.initialOid,
+        repositoryRootRealpath: fixture.repository.root,
+        commonDirRealpath: fixture.repository.commonDirRealpath,
+        workerGeneration: GENERATION,
+        idempotencyKey: "intermediate-symlink"
+      })).rejects.toThrow();
+
+      expect(await exists(join(outside, fixture.task.id))).toBe(false);
+      expect(fixture.gitArgvHistory.some(({ argv }) =>
+        argv[0] === "worktree" && argv[1] === "add")).toBe(false);
+    } finally {
+      await fixture.cleanup();
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("does not accept or automatically recreate a removed worktree on completed same-key replay", async () => {
+    const fixture = await createGitManagerFixture();
+    try {
+      const input = {
+        projectId: fixture.project.id,
+        taskId: fixture.task.id,
+        role: "lead" as const,
+        baseOid: fixture.repository.initialOid,
+        repositoryRootRealpath: fixture.repository.root,
+        commonDirRealpath: fixture.repository.commonDirRealpath,
+        workerGeneration: GENERATION,
+        idempotencyKey: "removed-replay"
+      };
+      const lead = await fixture.manager.ensureAgentWorktree(input);
+      await fixture.repository.run(["worktree", "remove", lead.pathRealpath]);
+      const addsBeforeReplay = fixture.gitArgvHistory.filter(({ argv }) =>
+        argv[0] === "worktree" && argv[1] === "add").length;
+
+      await expect(fixture.manager.ensureAgentWorktree(input))
+        .rejects.toThrow("COMPLETED_OPERATION_REQUIRES_RECONCILIATION");
+
+      expect(await exists(lead.pathRealpath)).toBe(false);
+      expect((await fixture.repository.run(["rev-parse", lead.branchRef])).stdout.trim())
+        .toBe(fixture.repository.initialOid);
+      expect(fixture.gitArgvHistory.filter(({ argv }) =>
+        argv[0] === "worktree" && argv[1] === "add")).toHaveLength(addsBeforeReplay);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it("does not accept or repair a wrong-OID branch on completed same-key replay", async () => {
+    const fixture = await createGitManagerFixture();
+    try {
+      const input = {
+        projectId: fixture.project.id,
+        taskId: fixture.task.id,
+        role: "lead" as const,
+        baseOid: fixture.repository.initialOid,
+        repositoryRootRealpath: fixture.repository.root,
+        commonDirRealpath: fixture.repository.commonDirRealpath,
+        workerGeneration: GENERATION,
+        idempotencyKey: "wrong-oid-replay"
+      };
+      const lead = await fixture.manager.ensureAgentWorktree(input);
+      await fixture.repository.write("external-replay.txt", "external replay\n");
+      await fixture.repository.run(["add", "--", "external-replay.txt"]);
+      await fixture.repository.run(["commit", "--no-gpg-sign", "-m", "External replay commit"]);
+      const wrongOid = (await fixture.repository.run(["rev-parse", "HEAD"])).stdout.trim();
+      await fixture.repository.run(["update-ref", lead.branchRef, wrongOid]);
+
+      await expect(fixture.manager.ensureAgentWorktree(input))
+        .rejects.toThrow("COMPLETED_OPERATION_REQUIRES_RECONCILIATION");
+
+      expect((await fixture.repository.run(["rev-parse", lead.branchRef])).stdout.trim()).toBe(wrongOid);
+      expect(fixture.gitArgvHistory.filter(({ argv }) =>
+        argv[0] === "worktree" && argv[1] === "add")).toHaveLength(1);
     } finally {
       await fixture.cleanup();
     }

@@ -73,4 +73,34 @@ describe("GitArtifactRepository", () => {
       .run("d".repeat(40), fixture.records.checkpoint.id)).toThrow("CHECKPOINT_IMMUTABLE");
     expect(artifacts.getCheckpoint(fixture.records.checkpoint.id)).toEqual(fixture.records.checkpoint);
   });
+
+  it("rolls back checkpoint insertion when advancing the worktree pointer fails", () => {
+    const fixture = openTestDatabase();
+    cleanups.push(async () => {
+      fixture.db.close();
+      await rm(fixture.directory, { recursive: true, force: true });
+    });
+    const repositories = createRepositories(fixture.db);
+    repositories.tasks.insert(fixture.records.task);
+    const artifacts = new GitArtifactRepository(fixture.db);
+    const worktree = { ...fixture.records.worktree, currentCheckpointOid: null };
+    artifacts.insertWorktree(worktree);
+    fixture.db.exec(`
+      CREATE TRIGGER fail_atomic_pointer
+      BEFORE UPDATE OF current_checkpoint_oid ON worktrees
+      BEGIN SELECT RAISE(ABORT, 'POINTER_WRITE_FAILED'); END
+    `);
+
+    expect(() => artifacts.persistCheckpoint(fixture.records.checkpoint))
+      .toThrow("POINTER_WRITE_FAILED");
+    expect(artifacts.getCheckpoint(fixture.records.checkpoint.id)).toBeNull();
+    expect(artifacts.getWorktree(worktree.taskId, worktree.role)?.currentCheckpointOid).toBeNull();
+
+    fixture.db.exec("DROP TRIGGER fail_atomic_pointer");
+    artifacts.persistCheckpoint(fixture.records.checkpoint);
+    expect(artifacts.getCheckpoint(fixture.records.checkpoint.id))
+      .toEqual(fixture.records.checkpoint);
+    expect(artifacts.getWorktree(worktree.taskId, worktree.role)?.currentCheckpointOid)
+      .toBe(fixture.records.checkpoint.oid);
+  });
 });

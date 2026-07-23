@@ -72,6 +72,8 @@ interface WorktreeObservation extends Record<string, unknown> {
 
 interface CommitObservation extends Record<string, unknown> {
   headOid: string | null;
+  finalHeadOid: string | null;
+  observedOid: string | null;
   branchRef: string | null;
   parentOid: string | null;
   trailer: string | null;
@@ -107,6 +109,27 @@ async function pathExists(path: string): Promise<boolean> {
   } catch (error) {
     if (error instanceof Error && "code" in error && error.code === "ENOENT") return false;
     throw error;
+  }
+}
+
+async function assertManagedParentSafe(managedRoot: string, targetParent: string): Promise<void> {
+  if (!isContained(managedRoot, targetParent)) throw new Error("WORKTREE_PATH_ESCAPES_MANAGED_ROOT");
+  const components = relative(managedRoot, targetParent).split(sep).filter(Boolean);
+  let current = managedRoot;
+  for (const component of components) {
+    current = join(current, component);
+    try {
+      const stats = await lstat(current);
+      if (stats.isSymbolicLink()) throw new Error("WORKTREE_PATH_SYMLINK_COMPONENT");
+      if (!stats.isDirectory()) throw new Error("WORKTREE_PATH_COMPONENT_NOT_DIRECTORY");
+      const currentRealpath = await realpath(current);
+      if (!isContained(managedRoot, currentRealpath)) {
+        throw new Error("WORKTREE_PATH_ESCAPES_MANAGED_ROOT");
+      }
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") return;
+      throw error;
+    }
   }
 }
 
@@ -184,6 +207,10 @@ export class GitManager {
       } else if (this.isExpectedWorktree(before, expectedOid, targetPath, branchRef, commonDir)) {
         action = "noop";
       }
+      const priorOperation = this.options.journal.getByIdempotencyKey(input.idempotencyKey);
+      if (priorOperation?.status === "completed" && action !== "noop") {
+        throw new Error(`COMPLETED_OPERATION_REQUIRES_RECONCILIATION:${priorOperation.id}`);
+      }
 
       const createdAt = this.options.now();
       const intent: OperationIntentRecord<{
@@ -212,6 +239,7 @@ export class GitManager {
           execute: async () => {
             if (action === "noop" || action === "conflict") return;
             try {
+              await assertManagedParentSafe(managedRoot, dirname(targetPath));
               await mkdir(dirname(targetPath), { recursive: true });
               const parentRealpath = await realpath(dirname(targetPath));
               if (!isContained(managedRoot, parentRealpath) || await pathExists(targetPath)) {
@@ -427,6 +455,8 @@ export class GitManager {
             } catch (error) {
               actual = {
                 headOid: null,
+                finalHeadOid: null,
+                observedOid: null,
                 branchRef: null,
                 parentOid: null,
                 trailer: null,
@@ -442,6 +472,8 @@ export class GitManager {
               return { outcome: "not_applied" as const, actual };
             }
             if (actual.parentOid !== expectedParent
+              || actual.observedOid !== actual.headOid
+              || actual.finalHeadOid !== actual.headOid
               || actual.branchRef !== storedWorktree.branchRef
               || actual.trailer !== input.checkpointId
               || actual.indexTreeOid !== actual.commitTreeOid
@@ -529,8 +561,7 @@ export class GitManager {
 
       const persisted = this.options.artifacts.getCheckpoint(input.checkpointId);
       if (persisted === null) {
-        this.options.artifacts.insertCheckpoint(result);
-        this.options.artifacts.updateCheckpoint(storedWorktree.id, result.oid);
+        this.options.artifacts.persistCheckpoint(result);
         return result;
       }
       if (persisted.oid !== result.oid || persisted.immutableRef !== result.immutableRef) {
@@ -639,14 +670,15 @@ export class GitManager {
     checkpointId: string,
     executionError: string | null
   ): Promise<CommitObservation> {
-    const [headOid, branchRef, metadata, indexTreeOid] = await Promise.all([
-      this.resolveHead(worktreePath),
+    const headOid = await this.resolveHead(worktreePath);
+    const [branchRef, metadata, indexTreeOid] = await Promise.all([
       this.resolveSymbolicHead(worktreePath),
       this.options.git.run(worktreePath, [
-        "show", "-s", "--format=%H%x00%P%x00%T%x00%an%x00%ae%x00%B", "HEAD"
+        "show", "-s", "--format=%H%x00%P%x00%T%x00%an%x00%ae%x00%B", headOid
       ]),
       this.options.git.run(worktreePath, ["write-tree"])
     ]);
+    const finalHeadOid = await this.resolveHead(worktreePath);
     const fields = metadata.stdout.split("\0");
     if (fields.length !== 6) throw new Error("CHECKPOINT_COMMIT_OBSERVATION_INVALID");
     const [observedOid = "", parents = "", commitTreeOid = "", authorName = "", authorEmail = "", body = ""] = fields;
@@ -661,6 +693,8 @@ export class GitManager {
       .filter((value): value is string => value !== null);
     return {
       headOid,
+      finalHeadOid,
+      observedOid,
       branchRef,
       parentOid: parentList.length === 1 ? parentList[0] ?? null : null,
       trailer: trailers.length === 1 && trailers[0] === checkpointId ? trailers[0] : null,

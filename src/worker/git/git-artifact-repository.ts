@@ -182,6 +182,13 @@ export class GitArtifactRepository {
     });
   }
 
+  persistCheckpoint(record: CheckpointRecord): void {
+    this.db.transaction(() => {
+      this.insertCheckpoint(record);
+      this.updateCheckpoint(record.worktreeId, record.oid);
+    });
+  }
+
   getCheckpoint(checkpointId: string): CheckpointRecord | null {
     const row = this.db.prepare(`SELECT ${CHECKPOINT_COLUMNS} FROM checkpoints WHERE id = ?`)
       .get(checkpointId) as CheckpointRow | undefined;

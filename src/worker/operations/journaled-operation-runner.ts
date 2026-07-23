@@ -27,7 +27,17 @@ export class JournaledOperationRunner {
 
     this.journal.markExecuting(durable.id);
     await spec.execute();
-    const observed = await spec.observe();
+    let observed: OperationObservation<O, R>;
+    try {
+      observed = await spec.observe();
+    } catch (error) {
+      const message = error instanceof Error ? `${error.name}:${error.message}` : String(error);
+      this.journal.needsAttention(durable.id, {
+        outcome: "uncertain",
+        actual: { error: message }
+      });
+      throw error;
+    }
     this.journal.recordObservation(durable.id, observed);
     if (observed.outcome === "applied") {
       this.journal.complete(durable.id);

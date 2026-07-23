@@ -216,7 +216,7 @@ describe("JournaledOperationRunner", () => {
     expect(observe).not.toHaveBeenCalled();
   });
 
-  it("retains executing state when observe throws", async () => {
+  it("durably marks an observation exception uncertain while preserving the error", async () => {
     const journal = inMemoryOperationJournal();
     const intent = operationIntent("observe-throws");
 
@@ -225,6 +225,12 @@ describe("JournaledOperationRunner", () => {
       execute: async () => undefined,
       observe: async () => { throw new Error("observation failed"); }
     })).rejects.toThrow("observation failed");
-    expect(journal.getByIdempotencyKey(intent.idempotencyKey)?.status).toBe("executing");
+    expect(journal.getByIdempotencyKey(intent.idempotencyKey)).toMatchObject({
+      status: "needs_attention",
+      observation: {
+        outcome: "uncertain",
+        actual: { error: "Error:observation failed" }
+      }
+    });
   });
 });
