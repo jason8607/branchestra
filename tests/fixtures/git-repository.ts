@@ -1,10 +1,19 @@
+import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { Project, Room, TaskRecord, WorktreeRecord } from "../../src/shared/contracts/domain";
+import { GitArtifactRepository } from "../../src/worker/git/git-artifact-repository";
 import { GitCommandRunner, type GitCommandResult } from "../../src/worker/git/git-command-runner";
+import { GitManager } from "../../src/worker/git/git-manager";
+import { GitReadService } from "../../src/worker/git/repository-inspector";
 import type { WorkspaceGuardIdentity } from "../../src/worker/git/workspace-path-guard";
+import { JournaledOperationRunner } from "../../src/worker/operations/journaled-operation-runner";
+import { RepositoryLock } from "../../src/worker/operations/repository-lock";
+import { createRepositories } from "../../src/worker/storage/repositories";
+import { openTestDatabase } from "./test-database";
 
 export interface GitRepositoryFixture {
   root: string;
@@ -12,6 +21,8 @@ export interface GitRepositoryFixture {
   initialOid: string;
   run(argv: readonly string[], cwd?: string): Promise<GitCommandResult>;
   write(relativePath: string, contents: string | Uint8Array): Promise<void>;
+  writeAt(root: string, relativePath: string, contents: string | Uint8Array): Promise<void>;
+  readAt(root: string, relativePath: string): Promise<string>;
   cleanup(): void | Promise<void>;
 }
 
@@ -58,17 +69,31 @@ export function createGitRepository(
       await mkdir(join(target, ".."), { recursive: true });
       await writeFile(target, contents);
     },
+    async writeAt(worktreeRoot, relativePath, contents) {
+      const target = join(worktreeRoot, relativePath);
+      await mkdir(join(target, ".."), { recursive: true });
+      await writeFile(target, contents);
+    },
+    readAt(worktreeRoot, relativePath) {
+      return readFile(join(worktreeRoot, relativePath), "utf8");
+    },
     cleanup() {
       rmSync(root, { recursive: true, force: true });
     }
   };
 }
 
-export async function createGitRepositoryFixture(): Promise<GitRepositoryFixture> {
+export async function createGitRepositoryFixture(
+  options: { objectFormat?: "sha1" | "sha256" } = {}
+): Promise<GitRepositoryFixture> {
   const root = await mkdtemp(join(tmpdir(), "branchestra git repository "));
   const git = new GitCommandRunner();
   try {
-    await git.run(root, ["init", "-b", "main"]);
+    await git.run(root, [
+      "init",
+      "-b", "main",
+      ...(options.objectFormat === undefined ? [] : [`--object-format=${options.objectFormat}`])
+    ]);
     await writeFile(join(root, "README.md"), "# Fixture\n", "utf8");
     await git.run(root, ["add", "--", "README.md"]);
     await git.run(root, ["commit", "--no-gpg-sign", "-m", "Initial commit"]);
@@ -88,6 +113,14 @@ export async function createGitRepositoryFixture(): Promise<GitRepositoryFixture
         const target = join(root, relativePath);
         await mkdir(join(target, ".."), { recursive: true });
         await writeFile(target, contents);
+      },
+      async writeAt(worktreeRoot, relativePath, contents) {
+        const target = join(worktreeRoot, relativePath);
+        await mkdir(join(target, ".."), { recursive: true });
+        await writeFile(target, contents);
+      },
+      readAt(worktreeRoot, relativePath) {
+        return readFile(join(worktreeRoot, relativePath), "utf8");
       },
       async cleanup() {
         await rm(root, { recursive: true, force: true });
@@ -129,6 +162,202 @@ export async function makePathGuardFixture(): Promise<PathGuardFixture> {
     };
   } catch (error) {
     await repository.cleanup();
+    throw error;
+  }
+}
+
+export interface GitManagerFixtureOptions {
+  repository?: GitRepositoryFixture;
+  objectFormat?: "sha1" | "sha256";
+  lock?: RepositoryLock;
+  afterGitRun?(cwd: string, argv: readonly string[]): void | Promise<void>;
+}
+
+export interface GitManagerFixture {
+  repository: GitRepositoryFixture;
+  project: Project;
+  room: Room;
+  task: TaskRecord;
+  manager: GitManager;
+  artifacts: GitArtifactRepository;
+  repositories: ReturnType<typeof createRepositories>;
+  journal: ReturnType<typeof createRepositories>["operations"];
+  db: ReturnType<typeof openTestDatabase>["db"];
+  lock: RepositoryLock;
+  managedWorktreeRoot: string;
+  gitArgvHistory: Array<{ cwd: string; argv: readonly string[] }>;
+  insertTask(taskId: string): TaskRecord;
+  cleanup(): Promise<void>;
+}
+
+export async function createGitManagerFixture(
+  options: GitManagerFixtureOptions = {}
+): Promise<GitManagerFixture> {
+  const ownsRepository = options.repository === undefined;
+  const repository = options.repository ?? await createGitRepositoryFixture({
+    ...(options.objectFormat === undefined ? {} : { objectFormat: options.objectFormat })
+  });
+  const managedWorktreeRoot = await mkdtemp(join(tmpdir(), "branchestra-managed-worktrees-"));
+  const database = openTestDatabase();
+  const repositories = createRepositories(database.db);
+  const artifacts = new GitArtifactRepository(database.db);
+  const lock = options.lock ?? new RepositoryLock();
+  const gitArgvHistory: Array<{ cwd: string; argv: readonly string[] }> = [];
+  const realGit = new GitCommandRunner();
+  const trackedGit = {
+    async run(cwd: string, argv: readonly string[]) {
+      gitArgvHistory.push({ cwd, argv: [...argv] });
+      const result = await realGit.run(cwd, argv);
+      await options.afterGitRun?.(cwd, argv);
+      return result;
+    },
+    async runBuffer(cwd: string, argv: readonly string[]) {
+      gitArgvHistory.push({ cwd, argv: [...argv] });
+      const result = await realGit.runBuffer(cwd, argv);
+      await options.afterGitRun?.(cwd, argv);
+      return result;
+    }
+  };
+  const createdAt = "2026-07-24T10:00:00.000Z";
+  const project: Project = {
+    id: "10000000-0000-4000-8000-000000000006",
+    repositoryRoot: repository.root,
+    gitCommonDir: repository.commonDirRealpath,
+    displayName: "git-manager-fixture",
+    headOid: repository.initialOid,
+    defaultBranch: "main",
+    createdAt
+  };
+  const room: Room = {
+    id: "20000000-0000-4000-8000-000000000006",
+    projectId: project.id,
+    title: "Git manager fixture",
+    createdAt
+  };
+  repositories.projects.insert(project);
+  repositories.rooms.insert(room);
+
+  const makeTask = (taskId: string): TaskRecord => ({
+    id: taskId,
+    roomId: room.id,
+    projectId: project.id,
+    requestEventId: `request-${taskId}`,
+    requestText: "Implement fixture task",
+    leadProvider: "claude",
+    targetRef: "refs/heads/main",
+    baseOid: repository.initialOid,
+    state: "Preparing",
+    interruptedFromState: null,
+    collaborationRoundsUsed: 0,
+    collaborationRoundBudget: 2,
+    humanRevisionCount: 0,
+    revisionKind: null,
+    scopeApprovalId: null,
+    activeCandidateId: null,
+    failure: null,
+    version: 1,
+    createdAt,
+    updatedAt: createdAt
+  });
+  const task = makeTask("task-1");
+  repositories.tasks.insert(task);
+  let timestampTick = 0;
+  const now = () => `2026-07-24T10:00:${String(timestampTick++).padStart(2, "0")}.000Z`;
+  const journal = repositories.operations;
+  const manager = new GitManager({
+    git: trackedGit,
+    readService: new GitReadService(trackedGit),
+    artifacts,
+    projects: repositories.projects,
+    tasks: repositories.tasks,
+    lock,
+    operations: new JournaledOperationRunner(journal),
+    journal,
+    managedWorktreeRoot,
+    id: randomUUID,
+    now
+  });
+  let closed = false;
+  return {
+    repository,
+    project,
+    room,
+    task,
+    manager,
+    artifacts,
+    repositories,
+    journal,
+    db: database.db,
+    lock,
+    managedWorktreeRoot,
+    gitArgvHistory,
+    insertTask(taskId) {
+      const inserted = makeTask(taskId);
+      repositories.tasks.insert(inserted);
+      return inserted;
+    },
+    async cleanup() {
+      if (closed) return;
+      closed = true;
+      database.db.close();
+      await Promise.all([
+        ownsRepository ? repository.cleanup() : Promise.resolve(),
+        rm(managedWorktreeRoot, { recursive: true, force: true }),
+        rm(database.directory, { recursive: true, force: true })
+      ]);
+    }
+  };
+}
+
+export interface PreparedLeadFixture extends GitManagerFixture {
+  lead: WorktreeRecord;
+  hookSentinel: string;
+  installHookThatWrites(hookName: string, sentinel: string): Promise<void>;
+  pathExists(path: string): Promise<boolean>;
+  git(...argv: string[]): Promise<string>;
+}
+
+export async function createPreparedLeadFixture(
+  options: GitManagerFixtureOptions = {}
+): Promise<PreparedLeadFixture> {
+  const fixture = await createGitManagerFixture(options);
+  try {
+    const lead = await fixture.manager.ensureAgentWorktree({
+      projectId: fixture.project.id,
+      taskId: fixture.task.id,
+      role: "lead",
+      baseOid: fixture.repository.initialOid,
+      repositoryRootRealpath: fixture.repository.root,
+      commonDirRealpath: fixture.repository.commonDirRealpath,
+      workerGeneration: "00000000-0000-4000-8000-000000000001",
+      idempotencyKey: "prepare-lead"
+    });
+    const hookSentinel = join(fixture.managedWorktreeRoot, "hook-ran");
+    return {
+      ...fixture,
+      lead,
+      hookSentinel,
+      async installHookThatWrites(hookName, sentinel) {
+        const hookPath = join(fixture.repository.commonDirRealpath, "hooks", hookName);
+        await mkdir(join(hookPath, ".."), { recursive: true });
+        await writeFile(hookPath, `#!/bin/sh\nprintf hook-ran > '${sentinel}'\n`, "utf8");
+        await chmod(hookPath, 0o755);
+      },
+      async pathExists(path) {
+        try {
+          await access(path);
+          return true;
+        } catch (error) {
+          if (error instanceof Error && "code" in error && error.code === "ENOENT") return false;
+          throw error;
+        }
+      },
+      async git(...argv) {
+        return (await fixture.repository.run(argv)).stdout.trim();
+      }
+    };
+  } catch (error) {
+    await fixture.cleanup();
     throw error;
   }
 }
