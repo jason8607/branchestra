@@ -74,6 +74,11 @@ Corepack under Node 20 and attempted `https://registry.npmjs.org/pnpm/latest`; r
 network access produced `ENOTFOUND`. The other 8 integration files passed in that run
 (92 tests passed, 1 build-wrapper test failed). No network access was requested or used.
 
+Controller verification after commit used a temporary fixed-Node-24 `pnpm build` wrapper
+for that infrastructure-only subprocess and ran the complete integration directory without
+exclusions: 9 files, 93 tests passed. The wrapper was outside the repository and did not
+modify production or test code.
+
 ## Self-Review
 
 Confirmed canonical repository/EventStore use, one transaction for creation and decisions,
