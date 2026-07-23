@@ -270,3 +270,71 @@ controller can run the full integration directory with its fixed Node 24 wrapper
 Controller verification after fix commit `c685ba3` used the temporary fixed-Node-24
 wrapper only for that internal build subprocess and ran the complete integration directory
 without exclusions: 11 files, 112 tests passed. The wrapper remained outside the repository.
+
+## Final Provider Boundary Correction
+
+Status: DONE
+
+The remaining Provider boundary review finding was corrected without changing production
+code or adding Task 7 Provider behavior.
+
+### RED
+
+Command:
+
+```text
+/Users/jason8607/.nvm/versions/node/v24.18.0/bin/node \
+  node_modules/vitest/vitest.mjs run \
+  tests/unit/git/provider-git-boundary.test.ts \
+  -t "orphan Provider modules|dynamic import and CommonJS require"
+```
+
+Result: 2 failed, 2 skipped.
+
+- The orphan `providers/orphan-provider.ts` was absent from `visited`, proving that the
+  entry-only seed missed unreferenced Provider modules and their static re-exports.
+- The reachable intermediary was visited, but its dynamic local storage/GitManager edges
+  and package `node:child_process` edges produced no violations.
+
+### GREEN
+
+Command:
+
+```text
+/Users/jason8607/.nvm/versions/node/v24.18.0/bin/node \
+  node_modules/vitest/vitest.mjs run tests/unit/git/provider-git-boundary.test.ts
+```
+
+Result: 1 file, 4 tests passed.
+
+The scanner now:
+
+- recursively seeds every TypeScript file under `src/worker/providers`, including nested
+  and orphan modules;
+- traverses resolved local static imports and re-exports, dynamic `import()`, and CommonJS
+  `require()` edges;
+- inspects forbidden package edges including `node:child_process`;
+- rejects non-literal dynamic module edges rather than silently accepting an unresolvable
+  authority path;
+- preserves the single approved terminal edge from the dedicated read port to
+  `GitReadService` as a type-only import; and
+- separately requires the expected Provider entry, read-port module, and entry-to-read-port
+  type-only contract.
+
+Temporary malicious regressions cover an orphan static re-export and a reachable
+intermediary containing dynamic local/package imports and local/package `require()` calls.
+The actual Provider source graph passes, so this correction revealed no production boundary
+violation.
+
+### Verification
+
+- Provider boundary: 1 file, 4 tests passed.
+- Full unit: 29 files, 316 tests passed.
+- Node typecheck: passed.
+- ESLint with zero warnings: passed.
+- `git diff --check`: passed.
+
+Changed files:
+
+- `.superpowers/sdd/task-6-report.md`
+- `tests/unit/git/provider-git-boundary.test.ts`
