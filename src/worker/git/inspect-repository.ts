@@ -2,7 +2,7 @@ import type { execFile as nodeExecFile } from "node:child_process";
 import { realpath as nodeRealpath } from "node:fs/promises";
 import type { ExecFileRunner } from "../process/exec-file";
 import { GitCommandRunner, type GitCommandResult } from "./git-command-runner";
-import { assertGitOid } from "./git-validation";
+import { assertBranchName, assertGitOid, GitValidationError } from "./git-validation";
 
 export interface RepositoryInspection {
   repositoryRoot: string;
@@ -70,6 +70,7 @@ export async function inspectExistingRepository(
     const headOid = await runGit(repositoryRoot, ["rev-parse", "--verify", "HEAD^{commit}"]);
     const branch = await runGit(repositoryRoot, ["rev-parse", "--abbrev-ref", "HEAD"]);
     assertGitOid(headOid);
+    if (branch !== "HEAD") assertBranchName(branch);
     return {
       repositoryRoot,
       gitCommonDir,
@@ -77,6 +78,7 @@ export async function inspectExistingRepository(
       defaultBranch: branch === "HEAD" ? null : branch
     };
   } catch (error) {
+    if (error instanceof GitValidationError && error.message === "GIT_REF_UNSUPPORTED") throw error;
     throw new GitRepositoryError(
       "Selected directory is not a Git repository with a valid HEAD",
       { cause: error }

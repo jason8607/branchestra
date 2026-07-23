@@ -205,6 +205,42 @@ describe("foundation domain services", () => {
     }
   });
 
+  it("rejects an unsupported inspected branch before storing a project or allocating an ID", async () => {
+    const database = openDatabase(":memory:");
+    try {
+      runMigrations(database);
+      const repositories = createRepositories(database);
+      let idCalls = 0;
+      const projects = createProjectService({
+        repositories,
+        idempotencyStore: createIdempotencyStore(database, () => "2026-07-21T12:00:00.000Z"),
+        inspectRepository: async () => ({
+          repositoryRoot: "/repo",
+          gitCommonDir: "/repo/.git",
+          headOid: "a".repeat(40),
+          defaultBranch: "日本語"
+        }),
+        clock: { now: () => "2026-07-21T12:00:00.000Z" },
+        ids: { next: () => {
+          idCalls += 1;
+          return "10000000-0000-4000-8000-000000000001";
+        } }
+      });
+
+      await expect(projects.addExistingProject({ selectedPath: "/repo" }, {
+        idempotencyKey: "unsupported-project-ref",
+        requestType: "project.addExisting",
+        requestHash: "unsupported-project-ref-hash",
+        workerGeneration: "50000000-0000-4000-8000-000000000001"
+      })).rejects.toThrow("GIT_REF_UNSUPPORTED");
+      expect(repositories.projects.list()).toEqual([]);
+      expect(idCalls).toBe(0);
+      expect(database.prepare("SELECT count(*) AS count FROM idempotency_records").get()).toEqual({ count: 0 });
+    } finally {
+      database.close();
+    }
+  });
+
   it("replays completed room and message commands before validation or dependency checks", () => {
     const database = openDatabase(":memory:");
     try {

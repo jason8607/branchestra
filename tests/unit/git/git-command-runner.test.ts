@@ -17,6 +17,8 @@ describe("GitCommandRunner", () => {
 
     expect(execFile).toHaveBeenCalledWith("/usr/bin/git", [
       "--no-pager",
+      "--no-lazy-fetch",
+      "--no-replace-objects",
       "-c", "user.name=Branchestra",
       "-c", "user.email=branchestra@localhost",
       "-c", "core.hooksPath=/dev/null",

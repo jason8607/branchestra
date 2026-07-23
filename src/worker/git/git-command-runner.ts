@@ -13,6 +13,8 @@ export interface GitCommandRunnerOptions {
 
 const GIT_ARGUMENT_PREFIX = [
   "--no-pager",
+  "--no-lazy-fetch",
+  "--no-replace-objects",
   "-c", "user.name=Branchestra",
   "-c", "user.email=branchestra@localhost",
   "-c", "core.hooksPath=/dev/null",

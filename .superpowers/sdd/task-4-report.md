@@ -22,6 +22,52 @@ GREEN. The fixed `/usr/bin/git` runner, repository identity/read service, canoni
 - `pnpm typecheck`: passed.
 - `pnpm lint`: passed with zero warnings.
 - `git diff --check`: passed.
+
+## Independent-review second fix round
+
+### Status and decisions
+
+- Added command-priority `--no-lazy-fetch` and `--no-replace-objects` to the shared `/usr/bin/git` prefix, so both text and buffer runner paths disable promisor fetches and replacement-object semantics before `-C` and the subcommand.
+- Kept the binding conservative ASCII `refs/heads/*` subset. Git-malformed/non-branch refs fail with `GIT_REF_INVALID`; Git-valid refs outside the supported product subset fail deliberately with `GIT_REF_UNSUPPORTED`.
+- Enforced the supported branch contract at strict M2 repository inspection and worktree-list boundaries, the M1 import inspector, and again in `ProjectService` before ID allocation, idempotency writes, or project persistence.
+- Preserved M1 compatibility: only `GIT_REF_UNSUPPORTED` crosses the legacy inspector boundary directly; legacy invalid-OID and other repository failures remain wrapped in `GitRepositoryError`.
+
+### TDD RED evidence
+
+- `/Users/jason8607/.nvm/versions/node/v24.18.0/bin/node node_modules/vitest/vitest.mjs run tests/unit/git/git-command-runner.test.ts tests/unit/git/git-validation.test.ts`
+  - RED: 3 failed, 25 passed. The argv lacked `--no-lazy-fetch` and `--no-replace-objects`; valid unsupported refs returned `GIT_REF_INVALID` instead of `GIT_REF_UNSUPPORTED`.
+- `/Users/jason8607/.nvm/versions/node/v24.18.0/bin/node node_modules/vitest/vitest.mjs run tests/integration/git/repository-inspector.test.ts -t "does not contact a promisor remote"`
+  - RED: the real filtered clone had a confirmed missing blob and contacted the bounded local promisor sentinel (`contacted: true`).
+- `/Users/jason8607/.nvm/versions/node/v24.18.0/bin/node node_modules/vitest/vitest.mjs run tests/integration/git/repository-inspector.test.ts -t "binds show, diff, and log"`
+  - RED: `show` returned the replacement commit subject and `replacement content` for the supplied original OID.
+- `/Users/jason8607/.nvm/versions/node/v24.18.0/bin/node node_modules/vitest/vitest.mjs run tests/integration/domain-services.test.ts -t "unsupported inspected branch"`
+  - RED: the unsupported Unicode branch resolved successfully and was stored as a project.
+
+### Focused GREEN evidence
+
+- Runner and ref validation: 2 files, 28 tests passed.
+- Real promisor, replacement-object, repository-inspection, and worktree-list regressions: 4 passed, 33 skipped.
+- M1 import and project-storage regressions: 3 passed, 8 skipped.
+- Task 4 plus M1 focused integration: 3 files, 48 tests passed.
+- M1 compatibility inspection: 2 files, 10 tests passed.
+- The promisor regression proves the missing-object read fails without executing the local remote sentinel and with an unchanged recursive object-database snapshot.
+- The replacement regression proves `show`, `diff`, and `log` content remains bound to the original supplied OIDs despite a real `refs/replace/*` entry.
+
+### Final verification after second fixes
+
+- Node runtime: `v24.18.0`.
+- Full unit: 24 files, 286 tests passed.
+- Full integration: 8 files, 86 tests passed.
+- Both `tsconfig.node.json` and `tsconfig.renderer.json` typechecks passed.
+- ESLint passed with zero warnings.
+- `git diff --check` passed.
+- Environment note: the initial `pnpm` attempt did not reach Vitest because sandboxed Corepack could not create `~/.cache/node/corepack/v1`; a direct local Vitest run supplied the RED evidence. The first broad integration attempt then inherited a Node 20 Corepack shim for its internal `pnpm build` and failed on blocked registry DNS. Final broad verification used a fixed Node 24 PATH and a temporary local `pnpm build` wrapper; the complete integration suite passed.
+
+### Self-review / concerns
+
+- All production Git execution still flows through the single argv-only runner with `/usr/bin/git`, `shell: false`, the controlled non-inherited environment, bounded buffers, and timeout/kill behavior.
+- The new global Git options precede configuration, `-C`, and every subcommand, including M1 production inspection.
+- The existing documented check-then-use filesystem limitation remains unchanged; no new blocking concern was found.
 - Covered exact runner argv/options/env, raw buffer output, spaces, bare/detached/unborn HEAD, nested identity, real SHA-1 and SHA-256 repositories, porcelain-v2 rename/untracked records, binary numstat, all five operation sentinels, bounded logs, `--` path separation, invalid OID/ref/pathspec/pathspec magic, worktree branch/locked/detached ownership, traversal, NUL/empty components, linked `.git`, common dir, symlink leaf/ancestor swaps, and nonexistent external leaves.
 
 ## Compatibility decisions

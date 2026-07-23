@@ -1,6 +1,8 @@
-import { access, chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
+import { access, chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { GitCommandRunner } from "../../../src/worker/git/git-command-runner";
 import { GitReadService } from "../../../src/worker/git/repository-inspector";
@@ -23,6 +25,23 @@ async function pathExists(path: string): Promise<boolean> {
     if (error instanceof Error && "code" in error && error.code === "ENOENT") return false;
     throw error;
   }
+}
+
+async function snapshotObjectDatabase(objectsPath: string): Promise<string[]> {
+  const files: string[] = [];
+  async function visit(directory: string): Promise<void> {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        await visit(path);
+      } else {
+        const bytes = await readFile(path);
+        files.push(`${relative(objectsPath, path)}:${bytes.length}:${createHash("sha256").update(bytes).digest("hex")}`);
+      }
+    }
+  }
+  await visit(objectsPath);
+  return files.sort();
 }
 
 afterEach(async () => {
@@ -83,6 +102,14 @@ describe("GitReadService repository identity", () => {
     const selected = await makeFixture();
     const service = new GitReadService(new GitCommandRunner());
     await expect(service.inspectRepository(selected.root, stored.root)).rejects.toThrow("REPOSITORY_IDENTITY_MISMATCH");
+  });
+
+  it("rejects a valid Git branch outside the supported product subset during inspection", async () => {
+    const fixture = await makeFixture();
+    await fixture.run(["branch", "-m", "日本語"]);
+
+    await expect(new GitReadService(new GitCommandRunner()).inspectRepository(fixture.root))
+      .rejects.toThrow("GIT_REF_UNSUPPORTED");
   });
 });
 
@@ -153,6 +180,98 @@ describe("GitReadService read-only queries", () => {
     expect(await readFile(indexPath)).toEqual(beforeBytes);
     expect((await stat(indexPath, { bigint: true })).mtimeNs).toBe(beforeStat.mtimeNs);
     expect(await pathExists(`${indexPath}.lock`)).toBe(false);
+  });
+
+  it("does not contact a promisor remote or mutate the object database for a missing object", async () => {
+    const source = await makeFixture();
+    await source.run(["config", "uploadpack.allowFilter", "true"]);
+    const parent = await mkdtemp(join(tmpdir(), "branchestra-partial-"));
+    extraRoots.push(parent);
+    const clone = join(parent, "partial");
+    await new GitCommandRunner().run(parent, [
+      "clone", "--no-local", "--no-checkout", "--filter=blob:none", `file://${source.root}`, clone
+    ]);
+    const blobOid = (await source.run(["rev-parse", `${source.initialOid}:README.md`])).stdout.trim();
+    expect(() => execFileSync("/usr/bin/git", [
+      "--no-lazy-fetch", "-C", clone, "cat-file", "-e", blobOid
+    ])).toThrow();
+
+    const sentinel = join(parent, "PROMISOR_CONTACTED");
+    const uploadPack = join(parent, "upload-pack-sentinel.sh");
+    const quotedSentinel = sentinel.replaceAll("'", "'\\''");
+    const quotedSource = source.root.replaceAll("'", "'\\''");
+    await writeFile(uploadPack, [
+      "#!/bin/sh",
+      `/usr/bin/touch '${quotedSentinel}'`,
+      `exec /usr/bin/git-upload-pack '${quotedSource}'`,
+      ""
+    ].join("\n"));
+    await chmod(uploadPack, 0o755);
+    await new GitCommandRunner().run(clone, ["remote", "set-url", "origin", `ext::${uploadPack}`]);
+    await new GitCommandRunner().run(clone, ["config", "protocol.ext.allow", "always"]);
+    const objectsPath = join(clone, ".git", "objects");
+    const before = await snapshotObjectDatabase(objectsPath);
+
+    let failed = false;
+    try {
+      await new GitReadService(new GitCommandRunner()).show({
+        repositoryRootRealpath: clone,
+        oid: source.initialOid,
+        path: "README.md"
+      });
+    } catch {
+      failed = true;
+    }
+
+    expect({
+      failed,
+      contacted: await pathExists(sentinel),
+      objectDatabase: await snapshotObjectDatabase(objectsPath)
+    }).toEqual({
+      failed: true,
+      contacted: false,
+      objectDatabase: before
+    });
+  });
+
+  it("binds show, diff, and log content to supplied OIDs despite replacement refs", async () => {
+    const fixture = await makeFixture();
+    await fixture.write("README.md", "original head\n");
+    await fixture.run(["add", "--", "README.md"]);
+    await fixture.run(["commit", "--no-gpg-sign", "-m", "Original head"]);
+    const originalHead = (await fixture.run(["rev-parse", "HEAD"])).stdout.trim();
+
+    await fixture.run(["switch", "--orphan", "replacement-root"]);
+    await fixture.write("README.md", "replacement content\n");
+    await fixture.run(["add", "-A"]);
+    await fixture.run(["commit", "--no-gpg-sign", "-m", "Replacement subject"]);
+    const replacementOid = (await fixture.run(["rev-parse", "HEAD"])).stdout.trim();
+    await fixture.run(["switch", "main"]);
+    await fixture.run(["replace", fixture.initialOid, replacementOid]);
+
+    const service = new GitReadService(new GitCommandRunner());
+    const shown = await service.show({
+      repositoryRootRealpath: fixture.root,
+      oid: fixture.initialOid,
+      path: "README.md"
+    });
+    const diff = await service.diff({
+      repositoryRootRealpath: fixture.root,
+      fromOid: fixture.initialOid,
+      toOid: originalHead
+    });
+    const log = await service.log({
+      repositoryRootRealpath: fixture.root,
+      startOid: fixture.initialOid,
+      maxCount: 1
+    });
+
+    expect(shown).toContain("+# Fixture");
+    expect(shown).not.toContain("replacement content");
+    expect(diff.patch).toContain("-# Fixture");
+    expect(diff.patch).toContain("+original head");
+    expect(diff.patch).not.toContain("replacement content");
+    expect(log).toMatchObject([{ oid: fixture.initialOid, subject: "Initial commit" }]);
   });
 
   it("rejects invalid UTF-8 path bytes instead of returning replacement characters", async () => {
@@ -344,6 +463,15 @@ describe("GitReadService read-only queries", () => {
       }
     };
     await expect(new GitReadService(git).listWorktrees(fixture.root)).rejects.toThrow("GIT_REF_INVALID");
+  });
+
+  it("rejects a worktree on a valid Git branch outside the supported product subset", async () => {
+    const fixture = await makeFixture();
+    const linked = join(fixture.root, "unsupported branch worktree");
+    await fixture.run(["worktree", "add", "-b", "日本語", linked]);
+
+    await expect(new GitReadService(new GitCommandRunner()).listWorktrees(fixture.root))
+      .rejects.toThrow("GIT_REF_UNSUPPORTED");
   });
 
   it("times out and kills a Git-configured executable alias", async () => {

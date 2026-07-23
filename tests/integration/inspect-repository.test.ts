@@ -39,4 +39,18 @@ describe("real Git repository inspection", () => {
       fixture.cleanup();
     }
   });
+
+  it.each(["日本語", "feature@owner"])(
+    "rejects a valid Git branch outside the supported project subset before import: %s",
+    async (branch) => {
+      const fixture = createGitRepository();
+      try {
+        execFileSync("/usr/bin/git", ["-C", fixture.root, "branch", "-m", branch]);
+
+        await expect(inspectExistingRepository(fixture.root)).rejects.toThrow("GIT_REF_UNSUPPORTED");
+      } finally {
+        fixture.cleanup();
+      }
+    }
+  );
 });

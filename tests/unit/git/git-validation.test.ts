@@ -31,10 +31,16 @@ describe("exact Git boundary validation", () => {
     "refs/heads/foo//bar",
     "refs/heads/foo/",
     "refs/heads/foo@{bar",
-    "refs/heads/日本語",
     "refs/tags/v1",
     "refs/heads/control\u001fbyte"
-  ])("rejects unsupported or Git-invalid branch ref %j", (ref) => {
+  ])("rejects Git-invalid branch ref %j", (ref) => {
     expect(() => assertBranchRef(ref)).toThrow("GIT_REF_INVALID");
+  });
+
+  it.each([
+    "refs/heads/日本語",
+    "refs/heads/feature@owner"
+  ])("rejects valid Git refs outside the supported product subset with a stable error %j", (ref) => {
+    expect(() => assertBranchRef(ref)).toThrow("GIT_REF_UNSUPPORTED");
   });
 });
