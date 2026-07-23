@@ -121,3 +121,11 @@ sensitive operation, and every conflict/cancellation test retains visible artifa
 Checked the final source for forbidden destructive Git commands and Provider imports.
 The sole concern is the environment-dependent Corepack full-integration wrapper failure
 described above.
+
+## Controller Verification
+
+After commit `a103583`, the controller supplied a temporary fixed-Node-24 wrapper only for
+the integration test's internal `pnpm build` subprocess and reran the complete integration
+directory without exclusions. Result: 11 files, 106 tests passed. The wrapper lived outside
+the repository and did not modify production or test code; the Corepack concern is resolved
+for the reviewed source state.
