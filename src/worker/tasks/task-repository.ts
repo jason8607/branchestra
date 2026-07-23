@@ -3,6 +3,7 @@ import type {
   TaskRecord,
   TaskTransition
 } from "../../shared/contracts/domain";
+import { TaskRecordSchema } from "../../shared/contracts/domain";
 import type { Database } from "../storage/database";
 import { assertCanonicalEventStore, type EventStore } from "../storage/event-store";
 
@@ -41,6 +42,13 @@ interface AgentRunRow {
   state: AgentRunRecord["state"];
   started_at: string;
   finished_at: string | null;
+}
+
+interface EngineCommandRow {
+  request_type: string;
+  request_hash: string;
+  status: string;
+  response_json: string | null;
 }
 
 const TASK_COLUMNS = [
@@ -246,5 +254,69 @@ export class TaskRepository {
     const result = this.db.prepare("UPDATE agent_runs SET state = ?, finished_at = ? WHERE id = ?")
       .run(state, finishedAt, runId);
     if (result.changes !== 1) throw new Error(`AGENT_RUN_NOT_FOUND:${runId}`);
+  }
+
+  updateRunSession(
+    runId: string,
+    providerSessionId: string | null,
+    state: AgentRunRecord["state"]
+  ): void {
+    const result = this.db.prepare(
+      "UPDATE agent_runs SET provider_session_id = ?, state = ? WHERE id = ?"
+    ).run(providerSessionId, state, runId);
+    if (result.changes !== 1) throw new Error(`AGENT_RUN_NOT_FOUND:${runId}`);
+  }
+
+  replayEngineCommand(
+    idempotencyKey: string,
+    requestType: string,
+    requestHash: string
+  ): TaskRecord | null {
+    const row = this.db.prepare(
+      "SELECT request_type, request_hash, status, response_json FROM idempotency_records WHERE idempotency_key = ?"
+    ).get(idempotencyKey) as EngineCommandRow | undefined;
+    if (!row) return null;
+    if (row.request_type !== requestType || row.request_hash !== requestHash) {
+      throw new Error(`ENGINE_IDEMPOTENCY_KEY_CONFLICT:${idempotencyKey}`);
+    }
+    if (row.status !== "completed" || row.response_json === null) {
+      throw new Error(`ENGINE_COMMAND_REQUIRES_RECONCILIATION:${idempotencyKey}`);
+    }
+    return TaskRecordSchema.parse(JSON.parse(row.response_json));
+  }
+
+  beginEngineCommand(input: {
+    idempotencyKey: string;
+    requestType: string;
+    requestHash: string;
+    workerGeneration: string;
+    createdAt: string;
+  }): void {
+    this.db.prepare(`
+      INSERT INTO idempotency_records(
+        idempotency_key, request_type, request_hash, worker_generation, status, created_at
+      ) VALUES (?, ?, ?, ?, 'pending', ?)
+    `).run(
+      input.idempotencyKey,
+      input.requestType,
+      input.requestHash,
+      input.workerGeneration,
+      input.createdAt
+    );
+  }
+
+  completeEngineCommand(
+    idempotencyKey: string,
+    task: TaskRecord,
+    completedAt: string
+  ): void {
+    const result = this.db.prepare(`
+      UPDATE idempotency_records
+      SET status = 'completed', response_json = ?, completed_at = ?
+      WHERE idempotency_key = ? AND status = 'pending'
+    `).run(JSON.stringify(TaskRecordSchema.parse(task)), completedAt, idempotencyKey);
+    if (result.changes !== 1) {
+      throw new Error(`ENGINE_COMMAND_NOT_PENDING:${idempotencyKey}`);
+    }
   }
 }
