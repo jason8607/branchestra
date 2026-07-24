@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type {
   TaskProviderEvent,
   TaskProviderPort,
+  TaskProviderRunHandle,
   TaskProviderRunResult
 } from "../../../src/worker/tasks/provider-port";
 import { NON_TERMINAL_TASK_STATES } from "../../../src/worker/tasks/task-state-machine";
@@ -164,6 +165,187 @@ describe("TaskEngine cancellation and process loss", () => {
         error: null
       });
       nextEvent.resolve({ value: undefined, done: true });
+      await running?.catch(() => undefined);
+      await fixture.cleanup();
+    }
+  });
+
+  it("cancels a pending start immediately and retires its late handle", async () => {
+    const started = Promise.withResolvers<TaskProviderRunHandle>();
+    const cancelCalled = Promise.withResolvers<string>();
+    const completion = Promise.withResolvers<TaskProviderRunResult>();
+    let iteratorReturns = 0;
+    let iteratorNexts = 0;
+    const lateHandle = (runId: string): TaskProviderRunHandle => ({
+      runId,
+      sessionId: "late-pending-session",
+      events: {
+        [Symbol.asyncIterator]() {
+          return {
+            async next() {
+              iteratorNexts += 1;
+              return { value: undefined, done: true };
+            },
+            async return() {
+              iteratorReturns += 1;
+              completion.resolve({
+                outcome: "cancelled",
+                summary: "late handle retired",
+                error: null
+              });
+              return { value: undefined, done: true };
+            }
+          };
+        }
+      },
+      completion: completion.promise
+    });
+    const provider: TaskProviderPort = {
+      startRun() {
+        return started.promise;
+      },
+      async resumeRun() {
+        throw new Error("UNEXPECTED_RESUME");
+      },
+      async cancelRun(runId) {
+        cancelCalled.resolve(runId);
+      }
+    };
+    const fixture = await createTaskEngineFixture({
+      mockScript: [],
+      maxRunMs: 20,
+      providerOverride: provider
+    });
+    let running: Promise<unknown> | undefined;
+    try {
+      running = fixture.engine.startApprovedTask("task-1", "pending-start");
+      while (fixture.inMemoryRunCounts().pending === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 1));
+      }
+
+      const cancelling = fixture.engine.cancel(
+        "task-1",
+        "timeout",
+        "pending-cancel"
+      );
+      const cancelledRunId = await Promise.race([
+        cancelCalled.promise,
+        new Promise<never>((_resolve, reject) => {
+          setTimeout(() => reject(new Error("PENDING_CANCEL_NOT_DISPATCHED")), 100);
+        })
+      ]);
+
+      expect(cancelledRunId).toBe(fixture.tasks.listRuns("task-1")[0]?.id);
+      const timedOut = await cancelling;
+      expect(timedOut).toMatchObject({
+        state: "Failed",
+        failure: { code: "CANCEL_GRACE_TIMEOUT" }
+      });
+      expect(fixture.inMemoryRunCounts()).toEqual({ active: 0, pending: 0 });
+
+      started.resolve(lateHandle(cancelledRunId));
+
+      await expect(running).resolves.toEqual(timedOut);
+      expect(iteratorReturns).toBe(1);
+      expect(iteratorNexts).toBe(0);
+      expect(fixture.tasks.getRequired("task-1")).toEqual(timedOut);
+      expect(fixture.tasks.listRuns("task-1")).toEqual([
+        expect.objectContaining({ state: "failed" })
+      ]);
+      expect(fixture.artifacts.listCheckpoints("task-1")).toHaveLength(0);
+      expect(fixture.events.byType("agent.run")).toHaveLength(0);
+      expect(fixture.inMemoryRunCounts()).toEqual({ active: 0, pending: 0 });
+    } finally {
+      const runId = fixture.tasks.listRuns("task-1")[0]?.id ?? "late-cleanup";
+      started.resolve(lateHandle(runId));
+      completion.resolve({
+        outcome: "cancelled",
+        summary: "cleanup",
+        error: null
+      });
+      await running?.catch(() => undefined);
+      await fixture.cleanup();
+    }
+  });
+
+  it("persists terminal failure when Provider cancellation rejects", async () => {
+    const completion = Promise.withResolvers<TaskProviderRunResult>();
+    const nextEvent = Promise.withResolvers<IteratorResult<TaskProviderEvent>>();
+    const consuming = Promise.withResolvers<void>();
+    const provider: TaskProviderPort = {
+      async startRun(request) {
+        return {
+          runId: request.runId,
+          sessionId: "reject-session",
+          events: {
+            [Symbol.asyncIterator]() {
+              return {
+                next() {
+                  consuming.resolve();
+                  return nextEvent.promise;
+                },
+                async return() {
+                  return { value: undefined, done: true };
+                }
+              };
+            }
+          },
+          completion: completion.promise
+        };
+      },
+      async resumeRun() {
+        throw new Error("UNEXPECTED_RESUME");
+      },
+      async cancelRun() {
+        throw new Error("CANCEL_REJECTED: adapter unavailable");
+      }
+    };
+    const fixture = await createTaskEngineFixture({
+      mockScript: [],
+      providerOverride: provider
+    });
+    let running: Promise<unknown> | undefined;
+    try {
+      running = fixture.engine.startApprovedTask("task-1", "reject-start");
+      await consuming.promise;
+
+      const failed = await fixture.engine.cancel(
+        "task-1",
+        "user",
+        "reject-cancel"
+      );
+
+      expect(failed).toMatchObject({
+        state: "Failed",
+        failure: {
+          code: "CANCEL_REJECTED",
+          message: "CANCEL_REJECTED: adapter unavailable"
+        }
+      });
+      expect(fixture.tasks.listRuns("task-1")).toEqual([
+        expect.objectContaining({ state: "failed" })
+      ]);
+      expect(fixture.inMemoryRunCounts()).toEqual({ active: 0, pending: 0 });
+      await expect(fixture.engine.cancel("task-1", "user", "reject-cancel"))
+        .resolves.toEqual(failed);
+      expect(fixture.providerCalls().cancelRun).toBe(1);
+
+      nextEvent.resolve({ value: undefined, done: true });
+      completion.resolve({
+        outcome: "cancelled",
+        summary: "settled after rejection",
+        error: null
+      });
+      await expect(running).resolves.toEqual(failed);
+      expect(fixture.tasks.getRequired("task-1")).toEqual(failed);
+      expect(fixture.artifacts.listCheckpoints("task-1")).toHaveLength(0);
+    } finally {
+      nextEvent.resolve({ value: undefined, done: true });
+      completion.resolve({
+        outcome: "cancelled",
+        summary: "cleanup",
+        error: null
+      });
       await running?.catch(() => undefined);
       await fixture.cleanup();
     }

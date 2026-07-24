@@ -243,3 +243,111 @@ ESLint passed with zero warnings.
 
 Concern: only the environment's default Node 20 Corepack launcher is unusable offline;
 direct Node 24 verification is green.
+
+## Cancellation Terminal Re-review Fix
+
+Status: DONE
+
+Implemented all three Important re-review findings test-first.
+
+### RED Evidence
+
+Terminal MockProvider identity:
+
+```text
+/Users/jason8607/.nvm/versions/node/v24.18.0/bin/node \
+  node_modules/vitest/vitest.mjs run tests/unit/providers/mock-provider.test.ts
+```
+
+RED: 1 failed and 7 passed. Cancelling the oldest of 80 completed runs rejected with
+`MOCK_RUN_NOT_FOUND:run-0`, proving terminal identity was incorrectly evicted.
+
+Pending-start and rejected-cancel paths:
+
+```text
+/Users/jason8607/.nvm/versions/node/v24.18.0/bin/node \
+  node_modules/vitest/vitest.mjs run \
+  tests/integration/tasks/task-engine-cancellation.test.ts \
+  -t "cancels a pending start immediately|persists terminal failure when Provider cancellation rejects" \
+  --testTimeout=5000
+```
+
+RED: both selected tests failed. The rejection escaped as
+`CANCEL_REJECTED: adapter unavailable`; the first pending test run also exposed a test-only
+teardown wait, which was corrected without changing production code. The precise pending
+RED was then rerun alone and failed with `PENDING_CANCEL_NOT_DISPATCHED`.
+
+### Fixes
+
+- Pending cancellation now dispatches `provider.cancelRun` immediately with the durable
+  run ID before awaiting `startRun`. Cancellation acknowledgement, late handle acquisition,
+  and completion all share the original single grace deadline.
+- A handle that arrives after the timeout observes durable Failed state and has its event
+  iterator closed through `return()` without reading an event, registering as active,
+  persisting an agent event, or creating a checkpoint.
+- A synchronous throw or rejected `cancelRun` now marks the durable run Failed, transitions
+  the task to Failed with the Provider's structured code/message, completes the engine
+  command for idempotent replay, and clears active/pending supervision maps in `finally`.
+- MockProvider now retains every terminal run ID for its lifetime while deleting the live
+  `MockRun`. Repeated cancellation of any known run remains idempotent, unknown IDs still
+  reject, and terminal IDs cannot be reused.
+
+### GREEN and Regression Evidence
+
+Focused GREEN commands:
+
+```text
+/Users/jason8607/.nvm/versions/node/v24.18.0/bin/node \
+  node_modules/vitest/vitest.mjs run tests/unit/providers/mock-provider.test.ts
+
+/Users/jason8607/.nvm/versions/node/v24.18.0/bin/node \
+  node_modules/vitest/vitest.mjs run \
+  tests/integration/tasks/task-engine-cancellation.test.ts \
+  -t "cancels a pending start immediately|persists terminal failure when Provider cancellation rejects" \
+  --testTimeout=5000
+```
+
+Results: MockProvider 8/8 passed; new cancellation cases 2/2 passed.
+
+Required regression command:
+
+```text
+/Users/jason8607/.nvm/versions/node/v24.18.0/bin/node \
+  node_modules/vitest/vitest.mjs run \
+  tests/unit/providers/mock-provider.test.ts \
+  tests/integration/tasks/task-engine-run.test.ts \
+  tests/integration/tasks/task-engine-cancellation.test.ts \
+  --testTimeout=15000
+```
+
+Result: 3 files, 36 tests passed.
+
+Static verification:
+
+```text
+git diff --check
+/Users/jason8607/.nvm/versions/node/v24.18.0/bin/node \
+  node_modules/typescript/bin/tsc -p tsconfig.node.json --noEmit
+/Users/jason8607/.nvm/versions/node/v24.18.0/bin/node \
+  node_modules/typescript/bin/tsc -p tsconfig.renderer.json --noEmit
+/Users/jason8607/.nvm/versions/node/v24.18.0/bin/node \
+  node_modules/eslint/bin/eslint.js . --max-warnings=0
+```
+
+Results: diff check, both typechecks, and ESLint with zero warnings all passed.
+
+### Self-Review
+
+- `cancelRun` is invoked synchronously after the grace timer starts and before any pending
+  handle await; no second timeout window is introduced.
+- Timeout and Provider rejection both persist run state before task state and complete the
+  durable engine command before returning.
+- Every cancellation outcome clears active and pending maps in `finally`; late pending
+  handles are closed at the durable-state gate and cannot enter event processing.
+- Terminal MockProvider entries contain only string IDs. Controllers, queues, deferred
+  completions, and buffered events remain reachable only from the returned handle, not the
+  Provider's live-run registry.
+- Changes remain within Task 7 Provider/task lifecycle implementation, tests, and report.
+  No Task 8 behavior was introduced.
+
+Concerns: none.

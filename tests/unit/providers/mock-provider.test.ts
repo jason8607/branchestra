@@ -187,7 +187,7 @@ describe("MockProvider", () => {
     });
   });
 
-  it("releases completed run resources and retains only bounded cancel tombstones", async () => {
+  it("releases live resources while retaining every known terminal run identity", async () => {
     const mock = new MockProvider(() => ({
       sessionId: "session-terminal",
       steps: [{ type: "run.completed", summary: "done" }]
@@ -200,11 +200,12 @@ describe("MockProvider", () => {
     }
 
     await expect(mock.cancelRun("run-79", "user")).resolves.toBeUndefined();
-    await expect(mock.cancelRun("run-0", "user")).rejects.toThrow(
-      "MOCK_RUN_NOT_FOUND:run-0"
+    await expect(mock.cancelRun("run-0", "user")).resolves.toBeUndefined();
+    await expect(mock.startRun({ ...request, runId: "run-0" })).rejects.toThrow(
+      "MOCK_RUN_ALREADY_EXISTS:run-0"
     );
-    const reused = await mock.startRun({ ...request, runId: "run-0" });
-    await collect(reused.events);
-    await expect(reused.completion).resolves.toMatchObject({ outcome: "completed" });
+    await expect(mock.cancelRun("never-started", "user")).rejects.toThrow(
+      "MOCK_RUN_NOT_FOUND:never-started"
+    );
   });
 });

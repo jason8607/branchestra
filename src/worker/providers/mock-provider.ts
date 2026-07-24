@@ -108,7 +108,6 @@ export class MockProvider implements TaskProviderPort {
   private readonly terminalRuns = new Set<string>();
   private readonly blockedWaiters: Array<Deferred<void>> = [];
   private blockedRuns = 0;
-  private static readonly MAX_TERMINAL_RUNS = 64;
 
   constructor(
     private readonly scriptForRun: (
@@ -242,11 +241,6 @@ export class MockProvider implements TaskProviderPort {
     run.settled = true;
     this.runs.delete(run.id);
     this.terminalRuns.add(run.id);
-    while (this.terminalRuns.size > MockProvider.MAX_TERMINAL_RUNS) {
-      const oldestRunId = this.terminalRuns.keys().next().value;
-      if (oldestRunId === undefined) break;
-      this.terminalRuns.delete(oldestRunId);
-    }
     run.controller.abort();
     run.queue.close();
     run.completion.resolve(result);

@@ -18,8 +18,7 @@ import type { DomainRepositories } from "../storage/repositories";
 import type {
   TaskProviderEvent,
   TaskProviderPort,
-  TaskProviderRunHandle,
-  TaskProviderRunResult
+  TaskProviderRunHandle
 } from "./provider-port";
 import { transitionTask } from "./task-state-machine";
 
@@ -180,6 +179,7 @@ export class TaskEngine {
       if (taskAfterProviderStart.state !== "Working"
         && taskAfterProviderStart.state !== "CancelRequested"
         && taskAfterProviderStart.state !== "Cancelled") {
+        await this.retireProviderHandle(handle);
         return taskAfterProviderStart;
       }
       if (taskAfterProviderStart.state === "Working") {
@@ -331,69 +331,70 @@ export class TaskEngine {
       const pending = this.pendingRuns.get(taskId);
       const receipt = active?.receipt ?? pending?.receipt;
       if (receipt) {
+        const runId = active?.handle.runId ?? pending?.runId;
+        if (!runId) throw new Error("CANCELLATION_RUN_NOT_FOUND");
         const timeout = Promise.withResolvers<"timeout">();
         const timer = setTimeout(
           () => timeout.resolve("timeout"),
           Math.max(1, Math.min(receipt.scope.maxRunMs, 5_000))
         );
-        let handle = active?.handle ?? null;
-        let completion: TaskProviderRunResult | "timeout";
         try {
-          if (!handle && pending) {
-            const started = await Promise.race([pending.handle, timeout.promise]);
-            if (started === "timeout") {
-              completion = "timeout";
-            } else {
-              handle = started;
-              const cancellableHandle = handle;
-              completion = await Promise.race([
-                this.options.provider.cancelRun(cancellableHandle.runId, reason)
-                  .then(() => cancellableHandle.completion),
-                timeout.promise
-              ]);
+          const cancelRequest = this.options.provider.cancelRun(runId, reason);
+          const settlement = cancelRequest.then(async () => {
+            const handle = active?.handle ?? await pending!.handle;
+            return {
+              handle,
+              completion: await handle.completion
+            };
+          });
+          const outcome = await Promise.race([settlement, timeout.promise]);
+          if (outcome === "timeout") {
+            const run = tasks.getRun(runId);
+            if (run?.state === "starting" || run?.state === "running") {
+              tasks.updateRunState(run.id, "failed", this.options.now());
             }
-          } else if (handle) {
-            const cancellableHandle = handle;
-            completion = await Promise.race([
-              this.options.provider.cancelRun(cancellableHandle.runId, reason)
-                .then(() => cancellableHandle.completion),
-              timeout.promise
-            ]);
-          } else {
-            completion = "timeout";
+            task = this.transition(task, {
+              type: "fail",
+              code: "CANCEL_GRACE_TIMEOUT",
+              message: "Provider cancellation did not settle before the approved deadline"
+            });
+            tasks.completeEngineCommand(idempotencyKey, task, this.options.now());
+            return task;
           }
+          const run = tasks.getRun(outcome.handle.runId);
+          if (run?.state === "starting" || run?.state === "running") {
+            tasks.updateRunState(
+              run.id,
+              outcome.completion.outcome === "failed" ? "failed" : "cancelled",
+              this.options.now()
+            );
+          }
+        } catch (error) {
+          const run = tasks.getRun(runId);
+          if (run?.state === "starting" || run?.state === "running") {
+            tasks.updateRunState(run.id, "failed", this.options.now());
+          }
+          task = this.transition(task, { type: "fail", ...errorDetails(error) });
+          tasks.completeEngineCommand(idempotencyKey, task, this.options.now());
+          return task;
         } finally {
           clearTimeout(timer);
           this.activeRuns.delete(taskId);
           this.pendingRuns.delete(taskId);
-        }
-        if (completion === "timeout") {
-          const runId = handle?.runId ?? pending?.runId;
-          const run = runId ? tasks.getRun(runId) : null;
-          if (run?.state === "starting" || run?.state === "running") {
-            tasks.updateRunState(run.id, "failed", this.options.now());
-          }
-          task = this.transition(task, {
-            type: "fail",
-            code: "CANCEL_GRACE_TIMEOUT",
-            message: "Provider cancellation did not settle before the approved deadline"
-          });
-          tasks.completeEngineCommand(idempotencyKey, task, this.options.now());
-          return task;
-        }
-        const run = handle ? tasks.getRun(handle.runId) : null;
-        if (run?.state === "starting" || run?.state === "running") {
-          tasks.updateRunState(
-            run.id,
-            completion.outcome === "failed" ? "failed" : "cancelled",
-            this.options.now()
-          );
         }
       }
       task = this.transition(task, { type: "cancelSettled" });
     }
     tasks.completeEngineCommand(idempotencyKey, task, this.options.now());
     return task;
+  }
+
+  private async retireProviderHandle(handle: TaskProviderRunHandle): Promise<void> {
+    try {
+      await handle.events[Symbol.asyncIterator]().return?.();
+    } catch {
+      // Durable terminal state remains authoritative if a late handle cannot close cleanly.
+    }
   }
 
   async handleProcessLoss(
