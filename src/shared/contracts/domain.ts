@@ -296,6 +296,30 @@ export const RoomEventSchema = z.union([
   roomEvent("approval.decided", z.object({ receipt: ApprovalReceiptSchema }).strict()),
   roomEvent("agent.run", z.object({ run: AgentRunRecordSchema, event: TaskProviderEventSummarySchema }).strict()),
   roomEvent("checkpoint.created", z.object({ checkpoint: CheckpointRecordSchema }).strict()),
+  roomEvent("review.started", z.object({
+    taskId: z.string().min(1), round: z.number().int().positive(),
+    purpose: z.enum(["parallel_implementation", "review"]), checkpointOid: GitOidSchema,
+    diffSummary: z.object({
+      filesChanged: NonNegativeIntegerSchema,
+      files: z.array(z.object({
+        path: z.string().min(1), status: z.string().min(1),
+        additions: NonNegativeIntegerSchema, deletions: NonNegativeIntegerSchema
+      }).strict()).max(200)
+    }).strict()
+  }).strict()),
+  roomEvent("review.completed", z.object({
+    taskId: z.string().min(1), round: z.number().int().positive(),
+    checkpointOid: GitOidSchema, findings: z.array(z.string().min(1).max(2_000)).max(100)
+  }).strict()),
+  roomEvent("checkpoint.integrated", z.object({
+    taskId: z.string().min(1), checkpointIds: z.array(z.string().min(1)).max(100),
+    sourceOids: z.array(GitOidSchema).max(100), headOid: GitOidSchema
+  }).strict()),
+  roomEvent("integration.conflict", z.object({
+    taskId: z.string().min(1), checkpointIds: z.array(z.string().min(1)).max(100),
+    sourceOids: z.array(GitOidSchema).max(100), files: z.array(z.string().min(1).max(4_096)).max(100),
+    headOidBefore: GitOidSchema
+  }).strict()),
   roomEvent("test.completed", z.object({ result: TestResultRecordSchema }).strict()),
   roomEvent("candidate.created", z.object({ candidate: IntegrationCandidateSchema }).strict()),
   roomEvent("task.interrupted", z.object({ taskId: z.string().min(1), from: NonTerminalTaskStateSchema, workerGeneration: z.string().min(1) }).strict()),
@@ -334,6 +358,21 @@ export type RoomEvent =
   | RoomEventBase<"approval.decided", { receipt: ApprovalReceipt }>
   | RoomEventBase<"agent.run", { run: AgentRunRecord; event: TaskProviderEventSummary }>
   | RoomEventBase<"checkpoint.created", { checkpoint: CheckpointRecord }>
+  | RoomEventBase<"review.started", {
+      taskId: string; round: number; purpose: "parallel_implementation" | "review";
+      checkpointOid: GitOid;
+      diffSummary: { filesChanged: number; files: GitDiffFileSummary[] };
+    }>
+  | RoomEventBase<"review.completed", {
+      taskId: string; round: number; checkpointOid: GitOid; findings: string[];
+    }>
+  | RoomEventBase<"checkpoint.integrated", {
+      taskId: string; checkpointIds: string[]; sourceOids: GitOid[]; headOid: GitOid;
+    }>
+  | RoomEventBase<"integration.conflict", {
+      taskId: string; checkpointIds: string[]; sourceOids: GitOid[];
+      files: string[]; headOidBefore: GitOid;
+    }>
   | RoomEventBase<"test.completed", { result: TestResultRecord }>
   | RoomEventBase<"candidate.created", { candidate: IntegrationCandidate }>
   | RoomEventBase<"task.interrupted", { taskId: string; from: Exclude<TaskState, "Completed" | "Cancelled" | "Failed">; workerGeneration: string }>

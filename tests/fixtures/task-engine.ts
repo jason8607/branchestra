@@ -1,11 +1,21 @@
 import { randomUUID } from "node:crypto";
-import { access, mkdtemp, realpath, rm } from "node:fs/promises";
+import { access, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Project, Room, RoomEvent } from "../../src/shared/contracts/domain";
+import type {
+  ApprovalReceipt,
+  ApprovalRequest,
+  Project,
+  Room,
+  RoomEvent,
+  TaskRecord
+} from "../../src/shared/contracts/domain";
+import { hashCanonical } from "../../src/worker/approvals/canonical-json";
+import { CollaborationCoordinator } from "../../src/worker/tasks/collaboration-coordinator";
 import { GitArtifactRepository } from "../../src/worker/git/git-artifact-repository";
 import { GitCommandRunner } from "../../src/worker/git/git-command-runner";
 import { GitManager } from "../../src/worker/git/git-manager";
+import { IntegrationService } from "../../src/worker/git/integration-service";
 import { GitReadService } from "../../src/worker/git/repository-inspector";
 import { JournaledOperationRunner } from "../../src/worker/operations/journaled-operation-runner";
 import { RepositoryLock } from "../../src/worker/operations/repository-lock";
@@ -14,10 +24,12 @@ import {
   type MockProviderStep
 } from "../../src/worker/providers/mock-provider";
 import type {
-  TaskProviderPort
+  TaskProviderPort,
+  TaskProviderRunRequest
 } from "../../src/worker/tasks/provider-port";
 import { TaskEngine } from "../../src/worker/tasks/task-engine";
 import { TaskService } from "../../src/worker/tasks/task-service";
+import { transitionTask } from "../../src/worker/tasks/task-state-machine";
 import { createEventStore } from "../../src/worker/storage/event-store";
 import { createIdempotencyStore } from "../../src/worker/storage/idempotency-store";
 import { createRepositories } from "../../src/worker/storage/repositories";
@@ -234,6 +246,9 @@ export async function createTaskEngineFixture(options: TaskEngineFixtureOptions)
   return {
     engine,
     mock,
+    provider,
+    repositories: base.repositories,
+    eventStore: base.eventStore,
     tasks: base.repositories.tasks,
     events: {
       ...base.events,
@@ -243,8 +258,12 @@ export async function createTaskEngineFixture(options: TaskEngineFixtureOptions)
     artifacts,
     journal: base.repositories.operations,
     repository: base.repository,
+    project: base.project,
+    room: base.room,
     manager,
     generation: base.generation,
+    id,
+    now: base.now,
     inMemoryRunCounts() {
       const internals = engine as unknown as {
         activeRuns: Map<string, unknown>;
@@ -312,5 +331,361 @@ export async function createTaskEngineFixture(options: TaskEngineFixtureOptions)
       await symlink(target, join(worktree.pathRealpath, relativePath), "dir");
     },
     cleanup: base.cleanup
+  };
+}
+
+export interface CollaborationFixtureOptions {
+  state?: TaskRecord["state"];
+  roundsUsed?: number;
+  allowCollaborator?: boolean;
+  reviewerWrites?: boolean;
+  parallelImplementation?: boolean;
+}
+
+export async function createCollaborationFixture(
+  options: CollaborationFixtureOptions = {}
+) {
+  const requests: TaskProviderRunRequest[] = [];
+  const scripted = new MockProvider((request) => ({
+    sessionId: `mock-${request.role}-${requests.length}`,
+    steps: request.role === "lead"
+      ? [
+          { type: "workspace.writeText", relativePath: "lead.txt", contents: "initial\n" },
+          { type: "run.completed", summary: "Lead checkpoint ready" }
+        ]
+      : request.role === "reviewer"
+        ? [
+            ...(options.reviewerWrites
+              ? [{ type: "workspace.writeText" as const, relativePath: "forbidden.txt", contents: "no\n" }]
+              : []),
+            { type: "run.completed", summary: "Review completed" }
+          ]
+        : [
+            ...(options.parallelImplementation
+              ? [{
+                  type: "workspace.writeText" as const,
+                  relativePath: "alternative.txt",
+                  contents: "alternative\n"
+                }]
+              : []),
+            { type: "run.completed", summary: "Collaborator completed" }
+          ]
+  }));
+  const provider: TaskProviderPort = {
+    startRun(request) {
+      requests.push(request);
+      return scripted.startRun(request);
+    },
+    resumeRun(request) {
+      return scripted.resumeRun(request);
+    },
+    cancelRun(runId, reason) {
+      return scripted.cancelRun(runId, reason);
+    }
+  };
+  const base = await createTaskEngineFixture({
+    mockScript: [],
+    ...(options.allowCollaborator === undefined
+      ? {}
+      : { allowCollaborator: options.allowCollaborator }),
+    providerOverride: provider
+  });
+  const desiredState = options.state;
+  if (desiredState !== undefined || options.roundsUsed !== undefined) {
+    const current = base.tasks.getRequired("task-1");
+    base.tasks.updateState({
+      ...current,
+      state: desiredState ?? current.state,
+      collaborationRoundsUsed: options.roundsUsed ?? current.collaborationRoundsUsed,
+      version: current.version + 1,
+      updatedAt: base.now()
+    }, current.version);
+  }
+
+  const collaboration = new CollaborationCoordinator({
+    repositories: base.repositories,
+    artifacts: base.artifacts,
+    events: base.eventStore,
+    manager: base.manager,
+    provider,
+    operations: new JournaledOperationRunner(base.repositories.operations),
+    workerGeneration: base.generation,
+    contextVersion: 1,
+    contextHash: `sha256:${"1".repeat(64)}`,
+    id: base.id,
+    now: base.now
+  });
+
+  const ensureLeadCheckpoint = async () => {
+    const existing = base.artifacts.listCheckpoints("task-1")
+      .filter((checkpoint) => checkpoint.worktreeId
+        === base.artifacts.getWorktree("task-1", "lead")?.id)
+      .at(-1);
+    if (existing) return existing;
+    const lead = await base.prepareLead("prepare-existing-lead");
+    await base.repository.writeAt(lead.pathRealpath, "lead.txt", "existing\n");
+    return base.manager.createCheckpoint({
+      projectId: base.project.id,
+      taskId: "task-1",
+      worktree: lead,
+      authorProvider: "claude",
+      purpose: "implementation",
+      message: "Existing lead checkpoint",
+      checkpointId: "lead-existing",
+      workerGeneration: base.generation,
+      idempotencyKey: "lead-existing"
+    });
+  };
+  if (desiredState !== undefined && desiredState !== "Preparing") {
+    await ensureLeadCheckpoint();
+  }
+
+  const latestCheckpoint = (role: "lead" | "collaborator") => {
+    const worktree = base.artifacts.getWorktree("task-1", role);
+    if (!worktree) throw new Error(`${role.toUpperCase()}_WORKTREE_NOT_FOUND`);
+    const checkpoint = base.artifacts.listCheckpoints("task-1")
+      .filter((candidate) => candidate.worktreeId === worktree.id)
+      .at(-1);
+    if (!checkpoint) throw new Error(`${role.toUpperCase()}_CHECKPOINT_NOT_FOUND`);
+    return checkpoint;
+  };
+
+  return {
+    ...base,
+    collaboration,
+    mock: {
+      requests: () => [...requests],
+      lastRequest(providerName: "claude" | "codex") {
+        const request = [...requests].reverse().find(({ provider }) => provider === providerName);
+        if (!request) throw new Error(`MOCK_REQUEST_NOT_FOUND:${providerName}`);
+        return request;
+      }
+    },
+    latestCheckpoint,
+    async runLeadRevision() {
+      const lead = base.artifacts.getWorktree("task-1", "lead");
+      if (!lead) throw new Error("LEAD_WORKTREE_NOT_FOUND");
+      await base.repository.writeAt(lead.pathRealpath, "lead.txt", "revised\n");
+      return base.manager.createCheckpoint({
+        projectId: base.project.id,
+        taskId: "task-1",
+        worktree: lead,
+        authorProvider: "claude",
+        purpose: "revision",
+        message: "Lead revision",
+        checkpointId: `lead-revision-${base.artifacts.listCheckpoints("task-1").length}`,
+        workerGeneration: base.generation,
+        idempotencyKey: `lead-revision-${base.artifacts.listCheckpoints("task-1").length}`
+      });
+    },
+    requestHumanRevision(instruction: string) {
+      const current = base.tasks.getRequired("task-1");
+      return base.tasks.applyTransition(
+        transitionTask(
+          { ...current, updatedAt: base.now() },
+          { type: "requestHumanRevision", instruction }
+        ),
+        base.id()
+      );
+    },
+    grantAdditionalRound(additionalRounds: 1 | 2) {
+      const task = base.tasks.getRequired("task-1");
+      const requestedAt = base.now();
+      const scope = { additionalRounds };
+      const request: ApprovalRequest = {
+        id: base.id(),
+        taskId: task.id,
+        kind: "additional_round",
+        scope,
+        scopeHash: hashCanonical(scope),
+        requestedGeneration: base.generation,
+        status: "pending",
+        requestedAt
+      };
+      const receipt: ApprovalReceipt = {
+        id: base.id(),
+        requestId: request.id,
+        taskId: task.id,
+        kind: "additional_round",
+        scope,
+        decision: "approved",
+        scopeHash: request.scopeHash,
+        workerGeneration: base.generation,
+        survivesWorkerRestart: false,
+        decidedAt: base.now()
+      };
+      base.repositories.approvals.insertRequest(request);
+      base.repositories.approvals.decideRequest(request.id, receipt);
+      base.eventStore.append({
+        id: base.id(),
+        roomId: task.roomId,
+        type: "approval.decided",
+        actor: "system",
+        payload: { receipt },
+        createdAt: receipt.decidedAt
+      });
+      return base.tasks.applyTransition(
+        transitionTask(
+          { ...task, updatedAt: base.now() },
+          {
+            type: "grantAdditionalRounds",
+            receiptId: receipt.id,
+            additionalRounds
+          }
+        ),
+        base.id()
+      );
+    }
+  };
+}
+
+export interface IntegrationFixtureOptions {
+  conflict: boolean;
+  multiple?: boolean;
+  foreignCheckpoint?: boolean;
+}
+
+export async function createIntegrationFixture(options: IntegrationFixtureOptions) {
+  const base = await createTaskEngineFixture({
+    mockScript: [],
+    initialState: "Review2"
+  });
+  const lead = await base.manager.ensureAgentWorktree({
+    projectId: base.project.id,
+    taskId: "task-1",
+    role: "lead",
+    baseOid: base.repository.initialOid,
+    repositoryRootRealpath: base.project.repositoryRoot,
+    commonDirRealpath: base.project.gitCommonDir,
+    workerGeneration: base.generation,
+    idempotencyKey: "integration-lead"
+  });
+  const collaborator = await base.manager.ensureAgentWorktree({
+    projectId: base.project.id,
+    taskId: "task-1",
+    role: "collaborator",
+    baseOid: base.repository.initialOid,
+    repositoryRootRealpath: base.project.repositoryRoot,
+    commonDirRealpath: base.project.gitCommonDir,
+    workerGeneration: base.generation,
+    idempotencyKey: "integration-collaborator"
+  });
+  await base.repository.writeAt(
+    lead.pathRealpath,
+    options.conflict ? "shared.txt" : "lead.txt",
+    options.conflict ? "lead\n" : "lead\n"
+  );
+  const leadCheckpoint = await base.manager.createCheckpoint({
+    projectId: base.project.id,
+    taskId: "task-1",
+    worktree: lead,
+    authorProvider: "claude",
+    purpose: "revision",
+    message: "Lead checkpoint",
+    checkpointId: "lead-cp-1",
+    workerGeneration: base.generation,
+    idempotencyKey: "lead-cp-1"
+  });
+  await base.repository.writeAt(collaborator.pathRealpath, "collaborator.txt", "alternative\n");
+  if (options.conflict) {
+    await base.repository.writeAt(collaborator.pathRealpath, "shared.txt", "collaborator\n");
+  }
+  const collaboratorCheckpoint = await base.manager.createCheckpoint({
+    projectId: base.project.id,
+    taskId: "task-1",
+    worktree: collaborator,
+    authorProvider: "codex",
+    purpose: "implementation",
+    message: "Collaborator checkpoint one",
+    checkpointId: "collaborator-cp-1",
+    workerGeneration: base.generation,
+    idempotencyKey: "collaborator-cp-1"
+  });
+  const collaboratorCheckpoints = [collaboratorCheckpoint];
+  if (options.multiple) {
+    const currentCollaborator = base.artifacts.getWorktree("task-1", "collaborator");
+    if (!currentCollaborator) throw new Error("COLLABORATOR_WORKTREE_NOT_FOUND");
+    await base.repository.writeAt(currentCollaborator.pathRealpath, "second.txt", "second\n");
+    collaboratorCheckpoints.push(await base.manager.createCheckpoint({
+      projectId: base.project.id,
+      taskId: "task-1",
+      worktree: currentCollaborator,
+      authorProvider: "codex",
+      purpose: "implementation",
+      message: "Collaborator checkpoint two",
+      checkpointId: "collaborator-cp-2",
+      workerGeneration: base.generation,
+      idempotencyKey: "collaborator-cp-2"
+    }));
+  }
+
+  let foreignCheckpoint: ReturnType<GitArtifactRepository["getCheckpoint"]> = null;
+  if (options.foreignCheckpoint) {
+    const current = base.tasks.getRequired("task-1");
+    const foreignTask: TaskRecord = {
+      ...current,
+      id: "task-2",
+      requestEventId: "message-task-2",
+      state: "Preparing",
+      version: 1,
+      createdAt: base.now(),
+      updatedAt: base.now()
+    };
+    base.tasks.insert(foreignTask);
+    const foreignWorktree = await base.manager.ensureAgentWorktree({
+      projectId: base.project.id,
+      taskId: "task-2",
+      role: "collaborator",
+      baseOid: base.repository.initialOid,
+      repositoryRootRealpath: base.project.repositoryRoot,
+      commonDirRealpath: base.project.gitCommonDir,
+      workerGeneration: base.generation,
+      idempotencyKey: "foreign-worktree"
+    });
+    await base.repository.writeAt(foreignWorktree.pathRealpath, "foreign.txt", "foreign\n");
+    foreignCheckpoint = await base.manager.createCheckpoint({
+      projectId: base.project.id,
+      taskId: "task-2",
+      worktree: foreignWorktree,
+      authorProvider: "codex",
+      purpose: "implementation",
+      message: "Foreign checkpoint",
+      checkpointId: "foreign-cp-1",
+      workerGeneration: base.generation,
+      idempotencyKey: "foreign-cp-1"
+    });
+  }
+
+  const integration = new IntegrationService({
+    artifacts: base.artifacts,
+    tasks: base.tasks,
+    projects: base.repositories.projects,
+    events: base.eventStore,
+    manager: base.manager,
+    id: base.id,
+    now: base.now
+  });
+
+  return {
+    ...base,
+    integration,
+    lead,
+    collaborator,
+    leadCheckpoint,
+    collaboratorCheckpoint,
+    collaboratorCheckpoints,
+    foreignCheckpoint,
+    readLead(relativePath: string) {
+      return base.repository.readAt(lead.pathRealpath, relativePath);
+    },
+    async writeLead(relativePath: string, contents: string) {
+      await writeFile(join(lead.pathRealpath, relativePath), contents, "utf8");
+    },
+    async gitAtLead(...argv: string[]) {
+      return (await base.repository.run(argv, lead.pathRealpath)).stdout.trim();
+    },
+    providerGitMutationCalls() {
+      return [] as string[];
+    }
   };
 }

@@ -46,6 +46,24 @@ export interface CreateCheckpointInput {
   idempotencyKey: string;
 }
 
+export type IntegrateCheckpointResult =
+  | { outcome: "integrated"; sourceOids: string[]; headOid: string }
+  | {
+      outcome: "conflict";
+      sourceOids: string[];
+      files: string[];
+      headOidBefore: string;
+    };
+
+export interface IntegrateCheckpointInput {
+  projectId: string;
+  taskId: string;
+  leadWorktree: WorktreeRecord;
+  checkpoints: CheckpointRecord[];
+  workerGeneration: string;
+  idempotencyKey: string;
+}
+
 export interface GitManagerOptions {
   git: Pick<GitCommandRunner, "run" | "runBuffer">;
   readService?: GitReadService;
@@ -571,6 +589,400 @@ export class GitManager {
     });
   }
 
+  async verifyCheckpointRef(input: {
+    projectId: string;
+    taskId: string;
+    checkpoint: CheckpointRecord;
+  }): Promise<void> {
+    const task = this.options.tasks.getRequired(input.taskId);
+    if (task.projectId !== input.projectId) throw new Error("TASK_PROJECT_MISMATCH");
+    if (input.checkpoint.taskId !== input.taskId) throw new Error("CHECKPOINT_TASK_MISMATCH");
+    if (input.checkpoint.immutableRef
+      !== `${CHECKPOINT_REF_PREFIX}${input.checkpoint.id}`) {
+      throw new Error("CHECKPOINT_IMMUTABLE_REF_INVALID");
+    }
+    const project = this.options.projects.findById(input.projectId);
+    if (!project) throw new Error(`PROJECT_NOT_FOUND:${input.projectId}`);
+    const repositoryRoot = await realpath(project.repositoryRoot);
+    const actual = await this.resolveRef(repositoryRoot, input.checkpoint.immutableRef);
+    if (actual !== input.checkpoint.oid) {
+      throw new Error("IMMUTABLE_CHECKPOINT_REF_CONFLICT");
+    }
+  }
+
+  async integrateCheckpoint(
+    input: IntegrateCheckpointInput
+  ): Promise<IntegrateCheckpointResult> {
+    assertSafeId(input.projectId, "PROJECT_ID_INVALID");
+    assertSafeId(input.taskId, "TASK_ID_INVALID");
+    if (input.checkpoints.length > 100) throw new Error("CHECKPOINT_SELECTION_TOO_LARGE");
+    const task = this.options.tasks.getRequired(input.taskId);
+    if (task.projectId !== input.projectId) throw new Error("TASK_PROJECT_MISMATCH");
+    const project = this.options.projects.findById(input.projectId);
+    if (!project) throw new Error(`PROJECT_NOT_FOUND:${input.projectId}`);
+    const storedLead = this.options.artifacts.getWorktree(input.taskId, "lead");
+    if (!storedLead
+      || input.leadWorktree.role !== "lead"
+      || !sameWorktreeIdentity(storedLead, input.leadWorktree)) {
+      throw new Error("LEAD_WORKTREE_RECORD_MISMATCH");
+    }
+    const checkpointIds = new Set<string>();
+    for (const checkpoint of input.checkpoints) {
+      if (checkpointIds.has(checkpoint.id)) throw new Error("DUPLICATE_CHECKPOINT_SELECTION");
+      checkpointIds.add(checkpoint.id);
+      if (checkpoint.taskId !== input.taskId) throw new Error("CHECKPOINT_TASK_MISMATCH");
+      if (checkpoint.immutableRef !== `${CHECKPOINT_REF_PREFIX}${checkpoint.id}`) {
+        throw new Error("CHECKPOINT_IMMUTABLE_REF_INVALID");
+      }
+      assertGitOid(checkpoint.oid);
+    }
+    const [repositoryRoot, commonDir, worktreePath] = await Promise.all([
+      realpath(project.repositoryRoot),
+      realpath(project.gitCommonDir),
+      realpath(storedLead.pathRealpath)
+    ]);
+    if (worktreePath !== storedLead.pathRealpath) {
+      throw new Error("WORKTREE_REALPATH_MISMATCH");
+    }
+    const identity = await this.readService.inspectRepository(worktreePath, worktreePath);
+    if (identity.commonDirRealpath !== commonDir) {
+      throw new Error("REPOSITORY_IDENTITY_MISMATCH");
+    }
+    const guard = await WorkspacePathGuard.create({
+      repositoryRootRealpath: repositoryRoot,
+      worktreeRootRealpath: worktreePath,
+      gitCommonDirRealpath: commonDir
+    });
+    await guard.assertChildCwd(worktreePath);
+
+    return this.options.lock.withLock(commonDir, async () => {
+      for (const checkpoint of input.checkpoints) {
+        const refOid = await this.resolveRef(repositoryRoot, checkpoint.immutableRef);
+        if (refOid !== checkpoint.oid) {
+          throw new Error("IMMUTABLE_CHECKPOINT_REF_CONFLICT");
+        }
+      }
+      const sourceOids = input.checkpoints.map(({ oid }) => oid);
+      const priorOperation = this.options.journal.getByIdempotencyKey(
+        input.idempotencyKey
+      );
+      if (priorOperation !== null
+        && (priorOperation.operationType !== "checkpoint.integrate"
+          || priorOperation.projectId !== input.projectId
+          || priorOperation.taskId !== input.taskId)) {
+        throw new Error("IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_INTENT");
+      }
+      let headAtStart: string;
+      if (priorOperation === null) {
+        const statusBefore = await this.readService.status({
+          repositoryRootRealpath: repositoryRoot,
+          worktreePathRealpath: worktreePath
+        });
+        if (!statusBefore.clean || statusBefore.inProgressOperation !== null) {
+          throw new Error("LEAD_WORKTREE_NOT_CLEAN");
+        }
+        headAtStart = await this.resolveHead(worktreePath);
+      } else {
+        const expected = priorOperation.expected;
+        if (typeof expected !== "object"
+          || expected === null
+          || !("headOidBefore" in expected)
+          || typeof expected.headOidBefore !== "string") {
+          throw new Error("RECORDED_INTEGRATION_INTENT_INVALID");
+        }
+        headAtStart = expected.headOidBefore;
+        assertGitOid(headAtStart);
+      }
+      const createdAt = this.options.now();
+      const intent: OperationIntentRecord<{
+        leadWorktreeId: string;
+        checkpointIds: string[];
+        sourceOids: string[];
+        headOidBefore: string;
+      }> = {
+        id: this.options.id(),
+        projectId: input.projectId,
+        taskId: input.taskId,
+        repositoryCommonDirRealpath: commonDir,
+        operationType: "checkpoint.integrate",
+        idempotencyKey: input.idempotencyKey,
+        expected: {
+          leadWorktreeId: storedLead.id,
+          checkpointIds: input.checkpoints.map(({ id }) => id),
+          sourceOids,
+          headOidBefore: headAtStart
+        },
+        status: "intent",
+        observation: null,
+        workerGeneration: input.workerGeneration,
+        createdAt,
+        updatedAt: createdAt
+      };
+      let result: IntegrateCheckpointResult | null = null;
+      let executionError: string | null = null;
+      try {
+        result = await this.options.operations.run<
+          typeof intent.expected,
+          Record<string, unknown>,
+          IntegrateCheckpointResult
+        >({
+          intent,
+          execute: async () => {
+            try {
+              if (input.checkpoints.length === 0) {
+                result = { outcome: "integrated", sourceOids, headOid: headAtStart };
+                return;
+              }
+              for (const checkpoint of input.checkpoints) {
+                const beforePick = await this.resolveHead(worktreePath);
+                const beforeStatus = await this.readService.status({
+                  repositoryRootRealpath: repositoryRoot,
+                  worktreePathRealpath: worktreePath
+                });
+                if (!beforeStatus.clean || beforeStatus.inProgressOperation !== null) {
+                  throw new Error("LEAD_WORKTREE_NOT_CLEAN");
+                }
+                try {
+                  await this.options.git.run(worktreePath, [
+                    "cherry-pick", "--no-gpg-sign", checkpoint.oid
+                  ]);
+                } catch (error) {
+                  const conflictStatus = await this.readService.status({
+                    repositoryRootRealpath: repositoryRoot,
+                    worktreePathRealpath: worktreePath
+                  });
+                  if (conflictStatus.inProgressOperation !== "cherry-pick") throw error;
+                  const cherryPickHead = await this.resolveRequiredRevision(
+                    worktreePath,
+                    "CHERRY_PICK_HEAD"
+                  );
+                  if (cherryPickHead !== checkpoint.oid) {
+                    throw new Error("CHERRY_PICK_HEAD_MISMATCH", { cause: error });
+                  }
+                  const files = this.unmergedFiles(conflictStatus.entries);
+                  if (files.length === 0) {
+                    throw new Error("CHERRY_PICK_CONFLICT_FILES_MISSING", { cause: error });
+                  }
+                  result = {
+                    outcome: "conflict",
+                    sourceOids,
+                    files,
+                    headOidBefore: beforePick
+                  };
+                  return;
+                }
+                const afterPick = await this.resolveHead(worktreePath);
+                if (afterPick === beforePick
+                  || !await this.hasSingleParent(worktreePath, afterPick, beforePick)) {
+                  throw new Error("CHERRY_PICK_PARENT_MISMATCH");
+                }
+              }
+              const finalStatus = await this.readService.status({
+                repositoryRootRealpath: repositoryRoot,
+                worktreePathRealpath: worktreePath
+              });
+              if (!finalStatus.clean || finalStatus.inProgressOperation !== null) {
+                throw new Error("INTEGRATED_WORKTREE_NOT_CLEAN");
+              }
+              result = {
+                outcome: "integrated",
+                sourceOids,
+                headOid: await this.resolveHead(worktreePath)
+              };
+            } catch (error) {
+              executionError = errorMessage(error);
+            }
+          },
+          observe: async () => {
+            if (result === null) {
+              return {
+                outcome: "uncertain" as const,
+                actual: { executionError }
+              };
+            }
+            if (result.outcome === "conflict") {
+              const [headOid, cherryPickHead] = await Promise.all([
+                this.resolveHead(worktreePath),
+                this.resolveRequiredRevision(worktreePath, "CHERRY_PICK_HEAD")
+              ]);
+              if (headOid !== result.headOidBefore
+                || !sourceOids.includes(cherryPickHead)
+                || result.files.length === 0) {
+                return {
+                  outcome: "conflict" as const,
+                  actual: { result, headOid, cherryPickHead, executionError }
+                };
+              }
+            } else if (await this.resolveHead(worktreePath) !== result.headOid) {
+              return {
+                outcome: "conflict" as const,
+                actual: {
+                  result,
+                  observedHeadOid: await this.resolveHead(worktreePath),
+                  executionError
+                }
+              };
+            }
+            return {
+              outcome: "applied" as const,
+              actual: { result, executionError },
+              result
+            };
+          }
+        });
+      } catch (error) {
+        if (executionError !== null) {
+          throw new Error("CHECKPOINT_INTEGRATION_NEEDS_ATTENTION", { cause: error });
+        }
+        throw error;
+      }
+      this.options.artifacts.updateCheckpoint(
+        storedLead.id,
+        result.outcome === "integrated" ? result.headOid : result.headOidBefore
+      );
+      return result;
+    });
+  }
+
+  async continueIntegration(input: {
+    projectId: string;
+    taskId: string;
+    leadWorktree: WorktreeRecord;
+    expectedSourceOid: string;
+    workerGeneration: string;
+    idempotencyKey: string;
+  }): Promise<{ headOid: string }> {
+    assertSafeId(input.projectId, "PROJECT_ID_INVALID");
+    assertSafeId(input.taskId, "TASK_ID_INVALID");
+    assertGitOid(input.expectedSourceOid);
+    const task = this.options.tasks.getRequired(input.taskId);
+    if (task.projectId !== input.projectId) throw new Error("TASK_PROJECT_MISMATCH");
+    const project = this.options.projects.findById(input.projectId);
+    if (!project) throw new Error(`PROJECT_NOT_FOUND:${input.projectId}`);
+    const storedLead = this.options.artifacts.getWorktree(input.taskId, "lead");
+    if (!storedLead
+      || input.leadWorktree.role !== "lead"
+      || !sameWorktreeIdentity(storedLead, input.leadWorktree)) {
+      throw new Error("LEAD_WORKTREE_RECORD_MISMATCH");
+    }
+    const [repositoryRoot, commonDir, worktreePath] = await Promise.all([
+      realpath(project.repositoryRoot),
+      realpath(project.gitCommonDir),
+      realpath(storedLead.pathRealpath)
+    ]);
+    return this.options.lock.withLock(commonDir, async () => {
+      const priorOperation = this.options.journal.getByIdempotencyKey(
+        input.idempotencyKey
+      );
+      if (priorOperation !== null
+        && (priorOperation.operationType !== "checkpoint.integrate.continue"
+          || priorOperation.projectId !== input.projectId
+          || priorOperation.taskId !== input.taskId)) {
+        throw new Error("IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_INTENT");
+      }
+      let headBefore: string;
+      if (priorOperation === null) {
+        const status = await this.readService.status({
+          repositoryRootRealpath: repositoryRoot,
+          worktreePathRealpath: worktreePath
+        });
+        if (status.inProgressOperation !== "cherry-pick") {
+          throw new Error("CHERRY_PICK_NOT_IN_PROGRESS");
+        }
+        const cherryPickHead = await this.resolveRequiredRevision(
+          worktreePath,
+          "CHERRY_PICK_HEAD"
+        );
+        if (cherryPickHead !== input.expectedSourceOid) {
+          throw new Error("CHERRY_PICK_HEAD_MISMATCH");
+        }
+        headBefore = await this.resolveHead(worktreePath);
+      } else {
+        const expected = priorOperation.expected;
+        if (typeof expected !== "object"
+          || expected === null
+          || !("headOidBefore" in expected)
+          || typeof expected.headOidBefore !== "string") {
+          throw new Error("RECORDED_INTEGRATION_INTENT_INVALID");
+        }
+        headBefore = expected.headOidBefore;
+        assertGitOid(headBefore);
+      }
+      const createdAt = this.options.now();
+      const intent: OperationIntentRecord<{
+        leadWorktreeId: string;
+        expectedSourceOid: string;
+        headOidBefore: string;
+      }> = {
+        id: this.options.id(),
+        projectId: input.projectId,
+        taskId: input.taskId,
+        repositoryCommonDirRealpath: commonDir,
+        operationType: "checkpoint.integrate.continue",
+        idempotencyKey: input.idempotencyKey,
+        expected: {
+          leadWorktreeId: storedLead.id,
+          expectedSourceOid: input.expectedSourceOid,
+          headOidBefore: headBefore
+        },
+        status: "intent",
+        observation: null,
+        workerGeneration: input.workerGeneration,
+        createdAt,
+        updatedAt: createdAt
+      };
+      let executionError: string | null = null;
+      let continuedHead: string | null = null;
+      let result: { headOid: string };
+      try {
+        result = await this.options.operations.run<
+          typeof intent.expected,
+          Record<string, unknown>,
+          { headOid: string }
+        >({
+          intent,
+          execute: async () => {
+            try {
+              await this.options.git.run(worktreePath, ["add", "--all"]);
+              await this.options.git.run(worktreePath, [
+                "cherry-pick", "--continue", "--no-gpg-sign"
+              ]);
+              continuedHead = await this.resolveHead(worktreePath);
+            } catch (error) {
+              executionError = errorMessage(error);
+            }
+          },
+          observe: async () => {
+            const finalStatus = await this.readService.status({
+              repositoryRootRealpath: repositoryRoot,
+              worktreePathRealpath: worktreePath
+            });
+            if (continuedHead === null
+              || !finalStatus.clean
+              || finalStatus.inProgressOperation !== null
+              || !await this.hasSingleParent(worktreePath, continuedHead, headBefore)) {
+              return {
+                outcome: "uncertain" as const,
+                actual: { continuedHead, finalStatus, executionError }
+              };
+            }
+            return {
+              outcome: "applied" as const,
+              actual: { continuedHead, executionError },
+              result: { headOid: continuedHead }
+            };
+          }
+        });
+      } catch (error) {
+        throw new Error("CHECKPOINT_INTEGRATION_CONTINUE_NEEDS_ATTENTION", {
+          cause: error
+        });
+      }
+      this.options.artifacts.updateCheckpoint(storedLead.id, result.headOid);
+      return result;
+    });
+  }
+
   private async resolveTaskRepository(input: EnsureAgentWorktreeInput): Promise<{
     project: Project;
     task: TaskRecord;
@@ -659,6 +1071,33 @@ export class GitManager {
     const oid = (await this.options.git.run(cwd, ["rev-parse", "--verify", "HEAD^{commit}"])).stdout.trim();
     assertGitOid(oid);
     return oid;
+  }
+
+  private async resolveRequiredRevision(cwd: string, revision: string): Promise<string> {
+    const oid = (await this.options.git.run(cwd, [
+      "rev-parse", "--verify", `${revision}^{commit}`
+    ])).stdout.trim();
+    assertGitOid(oid);
+    return oid;
+  }
+
+  private async hasSingleParent(
+    cwd: string,
+    oid: string,
+    expectedParent: string
+  ): Promise<boolean> {
+    const parents = (await this.options.git.run(cwd, [
+      "show", "-s", "--format=%P", oid
+    ])).stdout.trim();
+    return parents === expectedParent;
+  }
+
+  private unmergedFiles(entries: string[]): string[] {
+    const files = entries.filter((entry) => entry.startsWith("u "))
+      .map((entry) => entry.split(" ").slice(10).join(" "))
+      .filter((path) => path.length > 0)
+      .slice(0, 100);
+    return [...new Set(files)].sort();
   }
 
   private async resolveSymbolicHead(cwd: string): Promise<string> {

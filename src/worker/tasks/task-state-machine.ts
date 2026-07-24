@@ -58,7 +58,8 @@ export function transitionTask(current: TaskRecord, action: TaskAction): TaskTra
     case "Working:checkpointReady": return moved(current, { state: "Checkpoint" });
     case "Working:candidateReady": case "Checkpoint:candidateReady": case "Revision:candidateReady": case "Review2:candidateReady":
       return moved(current, { state: "Candidate", activeCandidateId: (action as Extract<TaskAction, { type: "candidateReady" }>).candidateId });
-    case "Review1:requestAgentRevision": return moved(current, { state: "Revision", revisionKind: "agent_review" });
+    case "Review1:requestAgentRevision": case "Review2:requestAgentRevision":
+      return moved(current, { state: "Revision", revisionKind: "agent_review" });
     case "Candidate:requestHumanApproval": return moved(current, { state: "HumanApproval" });
     case "HumanApproval:approveMerge": return moved(current, { state: "Merging" });
     case "Merging:mergeCompleted": return moved(current, { state: "Completed" });
