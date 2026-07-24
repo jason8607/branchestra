@@ -32,6 +32,19 @@ async function collect(events: AsyncIterable<TaskProviderEvent>): Promise<TaskPr
   return collected;
 }
 
+async function settleWithin<T>(promise: Promise<T>): Promise<T> {
+  const deadline = Promise.withResolvers<never>();
+  const timer = setTimeout(
+    () => deadline.reject(new Error("MOCK_COMPLETION_DID_NOT_SETTLE")),
+    250
+  );
+  try {
+    return await Promise.race([promise, deadline.promise]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 describe("MockProvider", () => {
   it("emits its script deterministically and completes", async () => {
     const mock = new MockProvider(() => ({
@@ -131,5 +144,67 @@ describe("MockProvider", () => {
       error: { code: "SCRIPT_FAILURE", message: "boom" }
     });
     await expect(collect(handle.events)).resolves.toEqual([]);
+  });
+
+  it("settles completion when a for-await consumer breaks before a terminal step", async () => {
+    const mock = new MockProvider(() => ({
+      sessionId: "session-early-break",
+      steps: [
+        { type: "assistant.message", text: "first" },
+        { type: "assistant.message", text: "second" },
+        { type: "waitForCancel" }
+      ]
+    }));
+    const handle = await mock.startRun(request);
+
+    for await (const event of handle.events) {
+      expect(event).toEqual({ type: "assistant.message", text: "first" });
+      break;
+    }
+
+    await expect(settleWithin(handle.completion)).resolves.toEqual({
+      outcome: "cancelled",
+      summary: "Event consumer closed",
+      error: null
+    });
+    await expect(mock.cancelRun("run-1", "quit")).resolves.toBeUndefined();
+  });
+
+  it("settles completion when AsyncIterator.return closes a blocked run", async () => {
+    const mock = new MockProvider(() => ({
+      sessionId: "session-return",
+      steps: [{ type: "waitForCancel" }]
+    }));
+    const handle = await mock.startRun(request);
+    const iterator = handle.events[Symbol.asyncIterator]();
+
+    await iterator.return?.();
+
+    await expect(settleWithin(handle.completion)).resolves.toEqual({
+      outcome: "cancelled",
+      summary: "Event consumer closed",
+      error: null
+    });
+  });
+
+  it("releases completed run resources and retains only bounded cancel tombstones", async () => {
+    const mock = new MockProvider(() => ({
+      sessionId: "session-terminal",
+      steps: [{ type: "run.completed", summary: "done" }]
+    }));
+
+    for (let index = 0; index < 80; index += 1) {
+      const handle = await mock.startRun({ ...request, runId: `run-${index}` });
+      await collect(handle.events);
+      await handle.completion;
+    }
+
+    await expect(mock.cancelRun("run-79", "user")).resolves.toBeUndefined();
+    await expect(mock.cancelRun("run-0", "user")).rejects.toThrow(
+      "MOCK_RUN_NOT_FOUND:run-0"
+    );
+    const reused = await mock.startRun({ ...request, runId: "run-0" });
+    await collect(reused.events);
+    await expect(reused.completion).resolves.toMatchObject({ outcome: "completed" });
   });
 });

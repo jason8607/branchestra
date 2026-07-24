@@ -124,3 +124,122 @@ operations never auto-replay; and no Milestone 3 SDK/CLI/executable enforcement 
 After commit `6a2df01`, the controller used the temporary fixed-Node-24 wrapper only for the
 integration test's internal build subprocess and ran the full integration directory without
 exclusions: 13 files, 137 tests passed. The wrapper remained outside the repository.
+
+## Review Fix Round
+
+Status: DONE
+
+Both Important lifecycle findings in `task-7-review.md` were fixed test-first.
+
+### RED Evidence
+
+MockProvider consumer-close/resource command:
+
+```text
+/Users/jason8607/.nvm/versions/node/v24.18.0/bin/node \
+  node_modules/vitest/vitest.mjs run tests/unit/providers/mock-provider.test.ts
+```
+
+RED: 3 failed and 5 passed. Both early consumer-close cases rejected with
+`MOCK_COMPLETION_DID_NOT_SETTLE`, and the oldest of 80 completed run IDs was still retained.
+
+TaskEngine cancellation-timeout command:
+
+```text
+/Users/jason8607/.nvm/versions/node/v24.18.0/bin/node \
+  node_modules/vitest/vitest.mjs run \
+  tests/integration/tasks/task-engine-cancellation.test.ts \
+  -t "retires timed-out handles" --testTimeout=5000
+```
+
+RED: 1 failed because the durable task/run were Failed but the engine still retained one
+active handle. The original implementation also allowed its late completion continuation
+to reach the closed fixture database.
+
+### Fixes
+
+- `AsyncIterator.return()` now settles the MockProvider run exactly once as cancelled,
+  aborts blocked producers, detaches the queue callback, closes waiters, and removes the
+  active run entry.
+- Completed/cancelled/failed mock runs retain only a bounded 64-entry terminal tombstone map.
+  Recent repeated cancel remains idempotent; evicted IDs can be safely reused without
+  retaining controllers, queues, or deferred completions.
+- TaskEngine starts the cancellation grace deadline before pending-handle adoption and
+  retires active and pending registrations in a `finally` path for success, timeout, or
+  Provider error.
+- Provider errors remain unwrapped. Cancellation timeout durably marks the run/task Failed,
+  and late Provider start/event/completion continuations return the existing durable result
+  without changing run state, creating a checkpoint, or re-registering a stale handle.
+- An engine-owned cancellation-settlement promise keeps the concurrent start call aligned
+  with the final Cancelled/Failed record while still consuming events buffered before a
+  successful cancellation.
+
+### GREEN and Verification Evidence
+
+- Focused Provider/engine boundary: 4 files, 38 tests passed.
+- Full unit: 30 files, 324 tests passed.
+- Relevant TaskEngine integration: 2 files, 26 tests passed.
+- Node and Renderer typechecks: passed.
+- ESLint with zero warnings: passed.
+- `git diff --check`: passed.
+
+## Review Fix Handoff Verification
+
+Revalidated the inherited dirty lifecycle fixes without discarding or reverting them.
+The default `pnpm` entry point selected Node 20 Corepack and failed before running tests
+because it attempted to resolve `https://registry.npmjs.org/pnpm/latest` in the
+network-restricted environment. No dependency download or network escalation was used.
+
+Equivalent commands were run directly with the repository's installed dependencies and
+required Node 24.18.0:
+
+```text
+/Users/jason8607/.nvm/versions/node/v24.18.0/bin/node \
+  node_modules/vitest/vitest.mjs run tests/unit/providers/mock-provider.test.ts
+```
+
+Result: 1 file, 8 tests passed.
+
+```text
+/Users/jason8607/.nvm/versions/node/v24.18.0/bin/node \
+  node_modules/vitest/vitest.mjs run \
+  tests/integration/tasks/task-engine-run.test.ts \
+  tests/integration/tasks/task-engine-cancellation.test.ts \
+  --testTimeout=15000
+```
+
+Result: 2 files, 26 tests passed. An initial direct invocation without the package
+script's `--testTimeout=15000` reproduced seven 5-second fixture timeouts and no assertion
+failure; the command above matches `test:integration` configuration.
+
+```text
+git diff --check
+/Users/jason8607/.nvm/versions/node/v24.18.0/bin/node \
+  node_modules/vitest/vitest.mjs run tests/unit
+/Users/jason8607/.nvm/versions/node/v24.18.0/bin/node \
+  node_modules/typescript/bin/tsc -p tsconfig.node.json --noEmit
+/Users/jason8607/.nvm/versions/node/v24.18.0/bin/node \
+  node_modules/typescript/bin/tsc -p tsconfig.renderer.json --noEmit
+/Users/jason8607/.nvm/versions/node/v24.18.0/bin/node \
+  node_modules/eslint/bin/eslint.js . --max-warnings=0
+```
+
+Results: diff check passed; 30 unit files and 324 tests passed; both typechecks passed;
+ESLint passed with zero warnings.
+
+### Handoff Self-Review
+
+- Mock terminal settlement is single-shot, removes the live run before resolving
+  completion, aborts blocked producers, closes queue readers/capacity waiters, and retains
+  at most 64 terminal IDs for recent idempotent cancellation.
+- Consumer `return()` detaches its callback before settling, so the settlement-triggered
+  queue close cannot recurse.
+- Cancellation starts one bounded deadline before adopting a pending handle and removes
+  active and pending registrations in `finally` on success, timeout, or Provider error.
+- After timeout, durable Failed task/run state gates late start, event, and completion
+  continuations before event persistence or checkpoint creation.
+- The diff remains limited to Task 7 lifecycle implementation, its fixture/tests, and this
+  report. No Task 8, SDK/CLI adapter, Git cleanup, or process-management behavior was added.
+
+Concern: only the environment's default Node 20 Corepack launcher is unusable offline;
+direct Node 24 verification is green.

@@ -33,7 +33,10 @@ class BoundedAsyncQueue<T> implements AsyncIterable<T> {
   private readonly capacityWaiters: Array<Deferred<void>> = [];
   private closed = false;
 
-  constructor(private readonly capacity: number) {}
+  constructor(
+    private readonly capacity: number,
+    private onConsumerReturn: (() => void) | null
+  ) {}
 
   async push(value: T, signal: AbortSignal): Promise<boolean> {
     while (!this.closed && this.values.length >= this.capacity) {
@@ -61,6 +64,7 @@ class BoundedAsyncQueue<T> implements AsyncIterable<T> {
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    this.onConsumerReturn = null;
     for (const reader of this.readers.splice(0)) {
       reader.resolve({ value: undefined, done: true });
     }
@@ -81,6 +85,9 @@ class BoundedAsyncQueue<T> implements AsyncIterable<T> {
         return reader.promise;
       },
       return: async () => {
+        const onConsumerReturn = this.onConsumerReturn;
+        this.onConsumerReturn = null;
+        onConsumerReturn?.();
         this.close();
         return { value: undefined, done: true };
       }
@@ -89,6 +96,7 @@ class BoundedAsyncQueue<T> implements AsyncIterable<T> {
 }
 
 interface MockRun {
+  id: string;
   controller: AbortController;
   queue: BoundedAsyncQueue<TaskProviderEvent>;
   completion: Deferred<TaskProviderRunResult>;
@@ -97,8 +105,10 @@ interface MockRun {
 
 export class MockProvider implements TaskProviderPort {
   private readonly runs = new Map<string, MockRun>();
+  private readonly terminalRuns = new Set<string>();
   private readonly blockedWaiters: Array<Deferred<void>> = [];
   private blockedRuns = 0;
+  private static readonly MAX_TERMINAL_RUNS = 64;
 
   constructor(
     private readonly scriptForRun: (
@@ -121,7 +131,10 @@ export class MockProvider implements TaskProviderPort {
     reason: "user" | "quit" | "timeout"
   ): Promise<void> {
     const run = this.runs.get(runId);
-    if (!run) throw new Error(`MOCK_RUN_NOT_FOUND:${runId}`);
+    if (!run) {
+      if (this.terminalRuns.has(runId)) return;
+      throw new Error(`MOCK_RUN_NOT_FOUND:${runId}`);
+    }
     if (run.settled || run.controller.signal.aborted) return;
     run.controller.abort();
     this.settle(run, {
@@ -143,10 +156,20 @@ export class MockProvider implements TaskProviderPort {
     sessionId: string,
     script: MockProviderScript
   ): TaskProviderRunHandle {
-    if (this.runs.has(runId)) throw new Error(`MOCK_RUN_ALREADY_EXISTS:${runId}`);
+    if (this.runs.has(runId) || this.terminalRuns.has(runId)) {
+      throw new Error(`MOCK_RUN_ALREADY_EXISTS:${runId}`);
+    }
     const run: MockRun = {
+      id: runId,
       controller: new AbortController(),
-      queue: new BoundedAsyncQueue<TaskProviderEvent>(16),
+      queue: new BoundedAsyncQueue<TaskProviderEvent>(
+        16,
+        () => this.settle(run, {
+          outcome: "cancelled",
+          summary: "Event consumer closed",
+          error: null
+        })
+      ),
       completion: deferred<TaskProviderRunResult>(),
       settled: false
     };
@@ -217,6 +240,14 @@ export class MockProvider implements TaskProviderPort {
   private settle(run: MockRun, result: TaskProviderRunResult): void {
     if (run.settled) return;
     run.settled = true;
+    this.runs.delete(run.id);
+    this.terminalRuns.add(run.id);
+    while (this.terminalRuns.size > MockProvider.MAX_TERMINAL_RUNS) {
+      const oldestRunId = this.terminalRuns.keys().next().value;
+      if (oldestRunId === undefined) break;
+      this.terminalRuns.delete(oldestRunId);
+    }
+    run.controller.abort();
     run.queue.close();
     run.completion.resolve(result);
   }

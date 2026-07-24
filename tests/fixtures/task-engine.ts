@@ -128,6 +128,7 @@ export interface TaskEngineFixtureOptions {
   commandClasses?: Array<"build" | "test" | "lint" | "format">;
   allowCollaborator?: boolean;
   maxRunMs?: number;
+  providerOverride?: TaskProviderPort;
 }
 
 export async function createTaskEngineFixture(options: TaskEngineFixtureOptions) {
@@ -194,18 +195,19 @@ export async function createTaskEngineFixture(options: TaskEngineFixtureOptions)
     steps: options.mockScript
   }));
   const calls = { startRun: 0, resumeRun: 0, cancelRun: 0 };
+  const providerTarget = options.providerOverride ?? mock;
   const provider: TaskProviderPort = {
     async startRun(request) {
       calls.startRun += 1;
-      return mock.startRun(request);
+      return providerTarget.startRun(request);
     },
     async resumeRun(request) {
       calls.resumeRun += 1;
-      return mock.resumeRun(request);
+      return providerTarget.resumeRun(request);
     },
     async cancelRun(runId, reason) {
       calls.cancelRun += 1;
-      return mock.cancelRun(runId, reason);
+      return providerTarget.cancelRun(runId, reason);
     }
   };
   const publishOrdering: boolean[] = [];
@@ -241,6 +243,16 @@ export async function createTaskEngineFixture(options: TaskEngineFixtureOptions)
     repository: base.repository,
     manager,
     generation: base.generation,
+    inMemoryRunCounts() {
+      const internals = engine as unknown as {
+        activeRuns: Map<string, unknown>;
+        pendingRuns: Map<string, unknown>;
+      };
+      return {
+        active: internals.activeRuns.size,
+        pending: internals.pendingRuns.size
+      };
+    },
     providerCalls: () => ({ ...calls }),
     gitMutationCalls: () => gitArgvHistory.map((argv) => argv.join(" ")),
     captureGitState: base.captureGitState,

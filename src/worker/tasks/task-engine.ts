@@ -18,7 +18,8 @@ import type { DomainRepositories } from "../storage/repositories";
 import type {
   TaskProviderEvent,
   TaskProviderPort,
-  TaskProviderRunHandle
+  TaskProviderRunHandle,
+  TaskProviderRunResult
 } from "./provider-port";
 import { transitionTask } from "./task-state-machine";
 
@@ -43,6 +44,7 @@ interface ActiveRun {
 }
 
 interface PendingRun {
+  runId: string;
   handle: Promise<TaskProviderRunHandle>;
   receipt: Extract<ApprovalReceipt, { kind: "task_scope" }>;
 }
@@ -68,6 +70,7 @@ function summarizeProviderEvent(event: TaskProviderEvent): TaskProviderEventSumm
 export class TaskEngine {
   private readonly activeRuns = new Map<string, ActiveRun>();
   private readonly pendingRuns = new Map<string, PendingRun>();
+  private readonly cancellationSettlements = new Map<string, Promise<TaskRecord>>();
 
   constructor(private readonly options: TaskEngineOptions) {}
 
@@ -167,19 +170,34 @@ export class TaskEngine {
         }
       });
       this.pendingRuns.set(task.id, {
+        runId: run.id,
         handle: handlePromise,
         receipt
       });
       const handle = await handlePromise;
       this.pendingRuns.delete(task.id);
-      this.options.repositories.tasks.updateRunSession(run.id, handle.sessionId, "running");
+      const taskAfterProviderStart = this.options.repositories.tasks.getRequired(task.id);
+      if (taskAfterProviderStart.state !== "Working"
+        && taskAfterProviderStart.state !== "CancelRequested"
+        && taskAfterProviderStart.state !== "Cancelled") {
+        return taskAfterProviderStart;
+      }
+      if (taskAfterProviderStart.state === "Working") {
+        this.options.repositories.tasks.updateRunSession(run.id, handle.sessionId, "running");
+        this.activeRuns.set(task.id, { handle, receipt });
+      }
       run = this.options.repositories.tasks.getRun(run.id);
       if (!run) throw new Error("AGENT_RUN_NOT_FOUND");
-      this.activeRuns.set(task.id, { handle, receipt });
       const workspace = await this.approvedWorkspace(task, worktree, project.gitCommonDir);
       let terminalEvent: Extract<TaskProviderEvent,
         { type: "run.completed" | "run.failed" }> | null = null;
       for await (const event of handle.events) {
+        const durableTask = this.options.repositories.tasks.getRequired(task.id);
+        if (durableTask.state !== "Working"
+          && durableTask.state !== "CancelRequested"
+          && durableTask.state !== "Cancelled") {
+          return durableTask;
+        }
         run = this.options.repositories.tasks.getRun(run.id) ?? run;
         await this.recordProviderEvent(task, run, event);
         if (event.type === "workspace.writeText") {
@@ -197,6 +215,13 @@ export class TaskEngine {
       }
       const completion = await handle.completion;
       this.activeRuns.delete(task.id);
+      const taskAfterCompletion = this.options.repositories.tasks.getRequired(task.id);
+      if (taskAfterCompletion.state === "CancelRequested") {
+        return await this.cancellationSettlements.get(task.id) ?? taskAfterCompletion;
+      }
+      if (taskAfterCompletion.state !== "Working") {
+        return taskAfterCompletion;
+      }
       if (completion.outcome === "cancelled") {
         const persistedRun = this.options.repositories.tasks.getRun(run.id);
         if (persistedRun?.state === "starting" || persistedRun?.state === "running") {
@@ -267,6 +292,22 @@ export class TaskEngine {
     reason: "user" | "quit" | "timeout",
     idempotencyKey: string
   ): Promise<TaskRecord> {
+    const cancellation = this.cancelTask(taskId, reason, idempotencyKey);
+    this.cancellationSettlements.set(taskId, cancellation);
+    try {
+      return await cancellation;
+    } finally {
+      if (this.cancellationSettlements.get(taskId) === cancellation) {
+        this.cancellationSettlements.delete(taskId);
+      }
+    }
+  }
+
+  private async cancelTask(
+    taskId: string,
+    reason: "user" | "quit" | "timeout",
+    idempotencyKey: string
+  ): Promise<TaskRecord> {
     const requestType = "task.cancel";
     const requestHash = hashCanonical({ taskId, reason });
     const tasks = this.options.repositories.tasks;
@@ -286,28 +327,49 @@ export class TaskEngine {
     }
     task = this.transition(task, { type: "cancel", reason });
     if (task.state === "CancelRequested") {
-      let active = this.activeRuns.get(taskId);
+      const active = this.activeRuns.get(taskId);
       const pending = this.pendingRuns.get(taskId);
-      if (!active && pending) {
-        const handle = await pending.handle;
-        active = { handle, receipt: pending.receipt };
-        this.activeRuns.set(taskId, active);
-        this.pendingRuns.delete(taskId);
-      }
-      if (active) {
+      const receipt = active?.receipt ?? pending?.receipt;
+      if (receipt) {
         const timeout = Promise.withResolvers<"timeout">();
         const timer = setTimeout(
           () => timeout.resolve("timeout"),
-          Math.max(1, Math.min(active.receipt.scope.maxRunMs, 5_000))
+          Math.max(1, Math.min(receipt.scope.maxRunMs, 5_000))
         );
-        const completion = await Promise.race([
-          this.options.provider.cancelRun(active.handle.runId, reason)
-            .then(() => active.handle.completion),
-          timeout.promise
-        ]);
-        clearTimeout(timer);
+        let handle = active?.handle ?? null;
+        let completion: TaskProviderRunResult | "timeout";
+        try {
+          if (!handle && pending) {
+            const started = await Promise.race([pending.handle, timeout.promise]);
+            if (started === "timeout") {
+              completion = "timeout";
+            } else {
+              handle = started;
+              const cancellableHandle = handle;
+              completion = await Promise.race([
+                this.options.provider.cancelRun(cancellableHandle.runId, reason)
+                  .then(() => cancellableHandle.completion),
+                timeout.promise
+              ]);
+            }
+          } else if (handle) {
+            const cancellableHandle = handle;
+            completion = await Promise.race([
+              this.options.provider.cancelRun(cancellableHandle.runId, reason)
+                .then(() => cancellableHandle.completion),
+              timeout.promise
+            ]);
+          } else {
+            completion = "timeout";
+          }
+        } finally {
+          clearTimeout(timer);
+          this.activeRuns.delete(taskId);
+          this.pendingRuns.delete(taskId);
+        }
         if (completion === "timeout") {
-          const run = tasks.getRun(active.handle.runId);
+          const runId = handle?.runId ?? pending?.runId;
+          const run = runId ? tasks.getRun(runId) : null;
           if (run?.state === "starting" || run?.state === "running") {
             tasks.updateRunState(run.id, "failed", this.options.now());
           }
@@ -319,7 +381,7 @@ export class TaskEngine {
           tasks.completeEngineCommand(idempotencyKey, task, this.options.now());
           return task;
         }
-        const run = tasks.getRun(active.handle.runId);
+        const run = handle ? tasks.getRun(handle.runId) : null;
         if (run?.state === "starting" || run?.state === "running") {
           tasks.updateRunState(
             run.id,
@@ -327,7 +389,6 @@ export class TaskEngine {
             this.options.now()
           );
         }
-        this.activeRuns.delete(taskId);
       }
       task = this.transition(task, { type: "cancelSettled" });
     }

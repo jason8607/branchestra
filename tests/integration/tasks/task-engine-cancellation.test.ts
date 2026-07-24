@@ -1,4 +1,9 @@
 import { describe, expect, it } from "vitest";
+import type {
+  TaskProviderEvent,
+  TaskProviderPort,
+  TaskProviderRunResult
+} from "../../../src/worker/tasks/provider-port";
 import { NON_TERMINAL_TASK_STATES } from "../../../src/worker/tasks/task-state-machine";
 import { createTaskEngineFixture } from "../../fixtures/task-engine";
 
@@ -73,6 +78,93 @@ describe("TaskEngine cancellation and process loss", () => {
       await expect(fixture.readLeadFile("done.txt")).resolves.toBe("done\n");
       expect(fixture.gitMutationCalls()).not.toContain("worktree remove");
     } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it("retires timed-out handles and ignores a late Provider completion", async () => {
+    const completion = Promise.withResolvers<TaskProviderRunResult>();
+    const nextEvent = Promise.withResolvers<IteratorResult<TaskProviderEvent>>();
+    const consuming = Promise.withResolvers<void>();
+    const provider: TaskProviderPort = {
+      async startRun(request) {
+        return {
+          runId: request.runId,
+          sessionId: "late-session",
+          events: {
+            [Symbol.asyncIterator]() {
+              return {
+                next() {
+                  consuming.resolve();
+                  return nextEvent.promise;
+                },
+                async return() {
+                  return { value: undefined, done: true };
+                }
+              };
+            }
+          },
+          completion: completion.promise
+        };
+      },
+      async resumeRun() {
+        throw new Error("UNEXPECTED_RESUME");
+      },
+      async cancelRun() {
+        // Intentionally acknowledges cancellation without settling completion.
+      }
+    };
+    const fixture = await createTaskEngineFixture({
+      mockScript: [],
+      maxRunMs: 20,
+      providerOverride: provider
+    });
+    let running: Promise<unknown> | undefined;
+    try {
+      running = fixture.engine.startApprovedTask("task-1", "timeout-start");
+      await consuming.promise;
+      expect(fixture.inMemoryRunCounts()).toEqual({ active: 1, pending: 0 });
+
+      const timedOut = await fixture.engine.cancel(
+        "task-1",
+        "timeout",
+        "timeout-cancel"
+      );
+
+      expect(timedOut).toMatchObject({
+        state: "Failed",
+        failure: { code: "CANCEL_GRACE_TIMEOUT" }
+      });
+      expect(fixture.inMemoryRunCounts()).toEqual({ active: 0, pending: 0 });
+      expect(fixture.tasks.listRuns("task-1")).toEqual([
+        expect.objectContaining({ state: "failed" })
+      ]);
+
+      nextEvent.resolve({
+        value: { type: "run.completed", summary: "too late" },
+        done: false
+      });
+      completion.resolve({
+        outcome: "completed",
+        summary: "too late",
+        error: null
+      });
+
+      await expect(running).resolves.toEqual(timedOut);
+      expect(fixture.tasks.getRequired("task-1")).toEqual(timedOut);
+      expect(fixture.tasks.listRuns("task-1")).toEqual([
+        expect.objectContaining({ state: "failed" })
+      ]);
+      expect(fixture.artifacts.listCheckpoints("task-1")).toHaveLength(0);
+      expect(fixture.inMemoryRunCounts()).toEqual({ active: 0, pending: 0 });
+    } finally {
+      completion.resolve({
+        outcome: "cancelled",
+        summary: "cleanup",
+        error: null
+      });
+      nextEvent.resolve({ value: undefined, done: true });
+      await running?.catch(() => undefined);
       await fixture.cleanup();
     }
   });
