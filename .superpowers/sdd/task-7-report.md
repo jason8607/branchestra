@@ -351,3 +351,112 @@ Results: diff check, both typechecks, and ESLint with zero warnings all passed.
   No Task 8 behavior was introduced.
 
 Concerns: none.
+
+## Terminal Run Lifecycle Re-review Fix
+
+Status: DONE
+
+Added the minimal TaskEngine-owned lifecycle signal required to settle start commands without
+waiting for an uncooperative Provider.
+
+### RED Evidence
+
+The three existing cancellation tests were strengthened so `running` must settle before
+their pending Provider start, event, or completion promises are released:
+
+```text
+/Users/jason8607/.nvm/versions/node/v24.18.0/bin/node \
+  node_modules/vitest/vitest.mjs run \
+  tests/integration/tasks/task-engine-cancellation.test.ts \
+  -t "retires timed-out handles|cancels a pending start immediately|persists terminal failure when Provider cancellation rejects" \
+  --testTimeout=5000
+```
+
+RED: all 3 selected tests failed. The exact failures were
+`ACTIVE_TIMEOUT_START_DID_NOT_SETTLE`, `PENDING_TIMEOUT_START_DID_NOT_SETTLE`, and
+`CANCEL_REJECTION_START_DID_NOT_SETTLE`.
+
+### Fix
+
+- Each non-replayed `startApprovedTask` owns a `RunLifecycle` terminal promise for exactly
+  the lifetime of that start command.
+- Pending `startRun`, each active `iterator.next()`, and Provider completion race the same
+  engine-owned terminal promise. A durable cancellation failure, timeout, successful
+  cancellation, or process-loss transition resolves it with the authoritative TaskRecord.
+- An active iterator has a once-only fire-and-forget close function. The engine invokes
+  `return()` without awaiting Provider cooperation, so a stuck `next()` or `return()` cannot
+  keep the start command pending.
+- If terminal state wins while `startRun` is pending, the start command returns immediately.
+  A later handle is retired through `return()` only; its events and completion never touch
+  repositories, publish events, mutate the workspace, or create a checkpoint.
+- Successful cancellation drains events already buffered before durable terminal state.
+  That consumer drain uses the remaining time on the original cancellation grace deadline,
+  not a second deadline. If it does not drain, the existing timeout failure path wins.
+- The event gate now permits mutation only while the durable task is Working or
+  CancelRequested. Once Cancelled/Failed/Interrupted is persisted and the lifecycle signal
+  resolves, late events cannot mutate.
+
+### GREEN and Regression Evidence
+
+Focused GREEN used the same command as RED:
+
+```text
+/Users/jason8607/.nvm/versions/node/v24.18.0/bin/node \
+  node_modules/vitest/vitest.mjs run \
+  tests/integration/tasks/task-engine-cancellation.test.ts \
+  -t "retires timed-out handles|cancels a pending start immediately|persists terminal failure when Provider cancellation rejects" \
+  --testTimeout=5000
+```
+
+Result: 3/3 selected tests passed, with 17 skipped.
+
+The first required regression run exposed one existing scheduling assumption: the mock could
+reach `waitForCancel` before the engine consumed its already-buffered workspace write, so
+immediate terminal signaling produced 35/36 passes and lost `partial.txt`. The bounded
+same-deadline consumer drain above fixed that regression without accepting events after
+durable terminal state.
+
+Final required regression:
+
+```text
+/Users/jason8607/.nvm/versions/node/v24.18.0/bin/node \
+  node_modules/vitest/vitest.mjs run \
+  tests/unit/providers/mock-provider.test.ts \
+  tests/integration/tasks/task-engine-cancellation.test.ts \
+  tests/integration/tasks/task-engine-run.test.ts \
+  --testTimeout=15000
+```
+
+Result: 3 files, 36 tests passed.
+
+Static verification:
+
+```text
+git diff --check
+/Users/jason8607/.nvm/versions/node/v24.18.0/bin/node \
+  node_modules/typescript/bin/tsc -p tsconfig.node.json --noEmit
+/Users/jason8607/.nvm/versions/node/v24.18.0/bin/node \
+  node_modules/typescript/bin/tsc -p tsconfig.renderer.json --noEmit
+/Users/jason8607/.nvm/versions/node/v24.18.0/bin/node \
+  node_modules/eslint/bin/eslint.js . --max-warnings=0
+```
+
+Results: diff check, both typechecks, and ESLint with zero warnings all passed.
+
+### Self-Review
+
+- The new abstraction is local to `TaskEngine`; Provider port and MockProvider contracts
+  are unchanged.
+- Exactly one lifecycle is registered per active start command and removed in
+  `startApprovedTask` `finally`.
+- Timeout/rejection persists run state, task state, and engine command before resolving the
+  lifecycle signal. Start-command completion then persists its own idempotent result before
+  deleting the lifecycle.
+- Consumer close is single-shot and rejection-safe. Neither close nor late handle
+  retirement awaits Provider-controlled promises.
+- The pre-terminal consumer drain is bounded by the original grace timer. Failed,
+  Cancelled, and Interrupted states never pass the event mutation gate.
+- The diff remains limited to Task 7 TaskEngine lifecycle logic, covering cancellation
+  tests, and this report. No Task 8 behavior was added.
+
+Concerns: none.

@@ -40,12 +40,20 @@ export interface TaskEngineOptions {
 interface ActiveRun {
   handle: TaskProviderRunHandle;
   receipt: Extract<ApprovalReceipt, { kind: "task_scope" }>;
+  closeConsumer(): void;
 }
 
 interface PendingRun {
   runId: string;
   handle: Promise<TaskProviderRunHandle>;
   receipt: Extract<ApprovalReceipt, { kind: "task_scope" }>;
+}
+
+interface RunLifecycle {
+  terminal: Promise<TaskRecord>;
+  consumerSettled: Promise<void>;
+  settle(task: TaskRecord): void;
+  settleConsumer(): void;
 }
 
 function errorDetails(error: unknown): { code: string; message: string } {
@@ -70,6 +78,7 @@ export class TaskEngine {
   private readonly activeRuns = new Map<string, ActiveRun>();
   private readonly pendingRuns = new Map<string, PendingRun>();
   private readonly cancellationSettlements = new Map<string, Promise<TaskRecord>>();
+  private readonly runLifecycles = new Map<string, RunLifecycle>();
 
   constructor(private readonly options: TaskEngineOptions) {}
 
@@ -93,16 +102,27 @@ export class TaskEngine {
       workerGeneration: this.options.workerGeneration,
       createdAt: this.options.now()
     });
-    const result = await this.runApprovedTask(taskId, idempotencyKey);
-    this.options.repositories.tasks.completeEngineCommand(
-      idempotencyKey,
-      result,
-      this.options.now()
-    );
-    return result;
+    const lifecycle = this.createRunLifecycle(taskId);
+    try {
+      const result = await this.runApprovedTask(taskId, idempotencyKey, lifecycle);
+      this.options.repositories.tasks.completeEngineCommand(
+        idempotencyKey,
+        result,
+        this.options.now()
+      );
+      return result;
+    } finally {
+      if (this.runLifecycles.get(taskId) === lifecycle) {
+        this.runLifecycles.delete(taskId);
+      }
+    }
   }
 
-  private async runApprovedTask(taskId: string, idempotencyKey: string): Promise<TaskRecord> {
+  private async runApprovedTask(
+    taskId: string,
+    idempotencyKey: string,
+    lifecycle: RunLifecycle
+  ): Promise<TaskRecord> {
     let task = this.options.repositories.tasks.getRequired(taskId);
     const receipt = this.approvedScope(task);
     const project = this.options.repositories.projects.findById(task.projectId);
@@ -173,29 +193,50 @@ export class TaskEngine {
         handle: handlePromise,
         receipt
       });
-      const handle = await handlePromise;
+      const started = await this.raceRunLifecycle(handlePromise, lifecycle);
+      if (started.kind === "terminal") {
+        this.pendingRuns.delete(task.id);
+        lifecycle.settleConsumer();
+        void handlePromise.then(
+          (lateHandle) => this.retireProviderHandle(lateHandle),
+          () => undefined
+        );
+        return started.task;
+      }
+      const handle = started.value;
       this.pendingRuns.delete(task.id);
       const taskAfterProviderStart = this.options.repositories.tasks.getRequired(task.id);
       if (taskAfterProviderStart.state !== "Working"
-        && taskAfterProviderStart.state !== "CancelRequested"
-        && taskAfterProviderStart.state !== "Cancelled") {
-        await this.retireProviderHandle(handle);
+        && taskAfterProviderStart.state !== "CancelRequested") {
+        this.retireProviderHandle(handle);
+        lifecycle.settleConsumer();
         return taskAfterProviderStart;
       }
+      const iterator = handle.events[Symbol.asyncIterator]();
+      const closeConsumer = this.consumerCloser(iterator);
       if (taskAfterProviderStart.state === "Working") {
         this.options.repositories.tasks.updateRunSession(run.id, handle.sessionId, "running");
-        this.activeRuns.set(task.id, { handle, receipt });
+        this.activeRuns.set(task.id, { handle, receipt, closeConsumer });
       }
       run = this.options.repositories.tasks.getRun(run.id);
       if (!run) throw new Error("AGENT_RUN_NOT_FOUND");
       const workspace = await this.approvedWorkspace(task, worktree, project.gitCommonDir);
       let terminalEvent: Extract<TaskProviderEvent,
         { type: "run.completed" | "run.failed" }> | null = null;
-      for await (const event of handle.events) {
+      while (true) {
+        const emitted = await this.raceRunLifecycle(iterator.next(), lifecycle);
+        if (emitted.kind === "terminal") {
+          closeConsumer();
+          lifecycle.settleConsumer();
+          this.activeRuns.delete(task.id);
+          return emitted.task;
+        }
+        if (emitted.value.done) break;
+        const event = emitted.value.value;
         const durableTask = this.options.repositories.tasks.getRequired(task.id);
         if (durableTask.state !== "Working"
-          && durableTask.state !== "CancelRequested"
-          && durableTask.state !== "Cancelled") {
+          && durableTask.state !== "CancelRequested") {
+          closeConsumer();
           return durableTask;
         }
         run = this.options.repositories.tasks.getRun(run.id) ?? run;
@@ -210,10 +251,18 @@ export class TaskEngine {
           throw new Error("COLLABORATOR_NOT_APPROVED");
         } else if (event.type === "run.completed" || event.type === "run.failed") {
           terminalEvent = event;
+          closeConsumer();
           break;
         }
       }
-      const completion = await handle.completion;
+      lifecycle.settleConsumer();
+      const settled = await this.raceRunLifecycle(handle.completion, lifecycle);
+      if (settled.kind === "terminal") {
+        closeConsumer();
+        this.activeRuns.delete(task.id);
+        return settled.task;
+      }
+      const completion = settled.value;
       this.activeRuns.delete(task.id);
       const taskAfterCompletion = this.options.repositories.tasks.getRequired(task.id);
       if (taskAfterCompletion.state === "CancelRequested") {
@@ -264,7 +313,9 @@ export class TaskEngine {
         checkpointOid: checkpoint.oid
       });
     } catch (error) {
+      lifecycle.settleConsumer();
       const active = this.activeRuns.get(task.id);
+      active?.closeConsumer();
       if (active) {
         try {
           await this.options.provider.cancelRun(active.handle.runId, "timeout");
@@ -323,6 +374,7 @@ export class TaskEngine {
     let task = tasks.getRequired(taskId);
     if (task.state === "Completed" || task.state === "Cancelled" || task.state === "Failed") {
       tasks.completeEngineCommand(idempotencyKey, task, this.options.now());
+      this.settleRunLifecycle(taskId, task);
       return task;
     }
     task = this.transition(task, { type: "cancel", reason });
@@ -338,6 +390,20 @@ export class TaskEngine {
           () => timeout.resolve("timeout"),
           Math.max(1, Math.min(receipt.scope.maxRunMs, 5_000))
         );
+        const failForTimeout = (): TaskRecord => {
+          const run = tasks.getRun(runId);
+          if (run?.state === "starting" || run?.state === "running") {
+            tasks.updateRunState(run.id, "failed", this.options.now());
+          }
+          task = this.transition(task, {
+            type: "fail",
+            code: "CANCEL_GRACE_TIMEOUT",
+            message: "Provider cancellation did not settle before the approved deadline"
+          });
+          tasks.completeEngineCommand(idempotencyKey, task, this.options.now());
+          this.settleRunLifecycle(taskId, task);
+          return task;
+        };
         try {
           const cancelRequest = this.options.provider.cancelRun(runId, reason);
           const settlement = cancelRequest.then(async () => {
@@ -349,17 +415,15 @@ export class TaskEngine {
           });
           const outcome = await Promise.race([settlement, timeout.promise]);
           if (outcome === "timeout") {
-            const run = tasks.getRun(runId);
-            if (run?.state === "starting" || run?.state === "running") {
-              tasks.updateRunState(run.id, "failed", this.options.now());
-            }
-            task = this.transition(task, {
-              type: "fail",
-              code: "CANCEL_GRACE_TIMEOUT",
-              message: "Provider cancellation did not settle before the approved deadline"
-            });
-            tasks.completeEngineCommand(idempotencyKey, task, this.options.now());
-            return task;
+            return failForTimeout();
+          }
+          const consumerSettled = this.runLifecycles.get(taskId)?.consumerSettled;
+          if (consumerSettled) {
+            const drained = await Promise.race([
+              consumerSettled.then(() => "drained" as const),
+              timeout.promise
+            ]);
+            if (drained === "timeout") return failForTimeout();
           }
           const run = tasks.getRun(outcome.handle.runId);
           if (run?.state === "starting" || run?.state === "running") {
@@ -376,6 +440,7 @@ export class TaskEngine {
           }
           task = this.transition(task, { type: "fail", ...errorDetails(error) });
           tasks.completeEngineCommand(idempotencyKey, task, this.options.now());
+          this.settleRunLifecycle(taskId, task);
           return task;
         } finally {
           clearTimeout(timer);
@@ -386,12 +451,60 @@ export class TaskEngine {
       task = this.transition(task, { type: "cancelSettled" });
     }
     tasks.completeEngineCommand(idempotencyKey, task, this.options.now());
+    this.settleRunLifecycle(taskId, task);
     return task;
   }
 
-  private async retireProviderHandle(handle: TaskProviderRunHandle): Promise<void> {
+  private createRunLifecycle(taskId: string): RunLifecycle {
+    if (this.runLifecycles.has(taskId)) {
+      throw new Error(`RUN_LIFECYCLE_ALREADY_EXISTS:${taskId}`);
+    }
+    const terminal = Promise.withResolvers<TaskRecord>();
+    const consumerSettled = Promise.withResolvers<void>();
+    const lifecycle: RunLifecycle = {
+      terminal: terminal.promise,
+      consumerSettled: consumerSettled.promise,
+      settle: terminal.resolve,
+      settleConsumer: () => consumerSettled.resolve()
+    };
+    this.runLifecycles.set(taskId, lifecycle);
+    return lifecycle;
+  }
+
+  private settleRunLifecycle(taskId: string, task: TaskRecord): void {
+    this.runLifecycles.get(taskId)?.settle(task);
+  }
+
+  private async raceRunLifecycle<T>(
+    operation: Promise<T>,
+    lifecycle: RunLifecycle
+  ): Promise<
+    | { kind: "value"; value: T }
+    | { kind: "terminal"; task: TaskRecord }
+  > {
+    return Promise.race([
+      operation.then((value) => ({ kind: "value" as const, value })),
+      lifecycle.terminal.then((task) => ({ kind: "terminal" as const, task }))
+    ]);
+  }
+
+  private consumerCloser(iterator: AsyncIterator<TaskProviderEvent>): () => void {
+    let closed = false;
+    return () => {
+      if (closed) return;
+      closed = true;
+      try {
+        const closing = iterator.return?.();
+        if (closing) void Promise.resolve(closing).catch(() => undefined);
+      } catch {
+        // Durable terminal state remains authoritative if a consumer cannot close cleanly.
+      }
+    };
+  }
+
+  private retireProviderHandle(handle: TaskProviderRunHandle): void {
     try {
-      await handle.events[Symbol.asyncIterator]().return?.();
+      this.consumerCloser(handle.events[Symbol.asyncIterator]())();
     } catch {
       // Durable terminal state remains authoritative if a late handle cannot close cleanly.
     }
@@ -417,6 +530,7 @@ export class TaskEngine {
     let task = tasks.getRequired(taskId);
     if (task.state === "Completed" || task.state === "Cancelled" || task.state === "Failed") {
       tasks.completeEngineCommand(idempotencyKey, task, this.options.now());
+      this.settleRunLifecycle(taskId, task);
       return task;
     }
 
@@ -479,6 +593,7 @@ export class TaskEngine {
     this.pendingRuns.delete(taskId);
     task = this.transition(task, { type: "processLoss", generation: lostGeneration });
     tasks.completeEngineCommand(idempotencyKey, task, this.options.now());
+    this.settleRunLifecycle(taskId, task);
     return task;
   }
 

@@ -8,6 +8,24 @@ import type {
 import { NON_TERMINAL_TASK_STATES } from "../../../src/worker/tasks/task-state-machine";
 import { createTaskEngineFixture } from "../../fixtures/task-engine";
 
+async function settleWithin<T>(promise: Promise<T>, failure: string): Promise<T> {
+  const deadline = Promise.withResolvers<never>();
+  const timer = setTimeout(() => deadline.reject(new Error(failure)), 1_000);
+  try {
+    return await Promise.race([promise, deadline.promise]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function waitUntil(predicate: () => boolean, failure: string): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  throw new Error(failure);
+}
+
 describe("TaskEngine cancellation and process loss", () => {
   it("settles CancelRequested and preserves branch, worktree, commit, and uncommitted content", async () => {
     const fixture = await createTaskEngineFixture({
@@ -87,6 +105,7 @@ describe("TaskEngine cancellation and process loss", () => {
     const completion = Promise.withResolvers<TaskProviderRunResult>();
     const nextEvent = Promise.withResolvers<IteratorResult<TaskProviderEvent>>();
     const consuming = Promise.withResolvers<void>();
+    let iteratorReturns = 0;
     const provider: TaskProviderPort = {
       async startRun(request) {
         return {
@@ -100,6 +119,7 @@ describe("TaskEngine cancellation and process loss", () => {
                   return nextEvent.promise;
                 },
                 async return() {
+                  iteratorReturns += 1;
                   return { value: undefined, done: true };
                 }
               };
@@ -141,6 +161,12 @@ describe("TaskEngine cancellation and process loss", () => {
         expect.objectContaining({ state: "failed" })
       ]);
 
+      await expect(settleWithin(
+        running,
+        "ACTIVE_TIMEOUT_START_DID_NOT_SETTLE"
+      )).resolves.toEqual(timedOut);
+      expect(iteratorReturns).toBe(1);
+
       nextEvent.resolve({
         value: { type: "run.completed", summary: "too late" },
         done: false
@@ -151,7 +177,6 @@ describe("TaskEngine cancellation and process loss", () => {
         error: null
       });
 
-      await expect(running).resolves.toEqual(timedOut);
       expect(fixture.tasks.getRequired("task-1")).toEqual(timedOut);
       expect(fixture.tasks.listRuns("task-1")).toEqual([
         expect.objectContaining({ state: "failed" })
@@ -242,10 +267,19 @@ describe("TaskEngine cancellation and process loss", () => {
         failure: { code: "CANCEL_GRACE_TIMEOUT" }
       });
       expect(fixture.inMemoryRunCounts()).toEqual({ active: 0, pending: 0 });
+      await expect(settleWithin(
+        running,
+        "PENDING_TIMEOUT_START_DID_NOT_SETTLE"
+      )).resolves.toEqual(timedOut);
+      expect(iteratorReturns).toBe(0);
+      expect(iteratorNexts).toBe(0);
 
       started.resolve(lateHandle(cancelledRunId));
 
-      await expect(running).resolves.toEqual(timedOut);
+      await waitUntil(
+        () => iteratorReturns === 1,
+        "LATE_PENDING_HANDLE_NOT_RETIRED"
+      );
       expect(iteratorReturns).toBe(1);
       expect(iteratorNexts).toBe(0);
       expect(fixture.tasks.getRequired("task-1")).toEqual(timedOut);
@@ -272,6 +306,7 @@ describe("TaskEngine cancellation and process loss", () => {
     const completion = Promise.withResolvers<TaskProviderRunResult>();
     const nextEvent = Promise.withResolvers<IteratorResult<TaskProviderEvent>>();
     const consuming = Promise.withResolvers<void>();
+    let iteratorReturns = 0;
     const provider: TaskProviderPort = {
       async startRun(request) {
         return {
@@ -285,6 +320,7 @@ describe("TaskEngine cancellation and process loss", () => {
                   return nextEvent.promise;
                 },
                 async return() {
+                  iteratorReturns += 1;
                   return { value: undefined, done: true };
                 }
               };
@@ -329,6 +365,11 @@ describe("TaskEngine cancellation and process loss", () => {
       await expect(fixture.engine.cancel("task-1", "user", "reject-cancel"))
         .resolves.toEqual(failed);
       expect(fixture.providerCalls().cancelRun).toBe(1);
+      await expect(settleWithin(
+        running,
+        "CANCEL_REJECTION_START_DID_NOT_SETTLE"
+      )).resolves.toEqual(failed);
+      expect(iteratorReturns).toBe(1);
 
       nextEvent.resolve({ value: undefined, done: true });
       completion.resolve({
@@ -336,7 +377,6 @@ describe("TaskEngine cancellation and process loss", () => {
         summary: "settled after rejection",
         error: null
       });
-      await expect(running).resolves.toEqual(failed);
       expect(fixture.tasks.getRequired("task-1")).toEqual(failed);
       expect(fixture.artifacts.listCheckpoints("task-1")).toHaveLength(0);
     } finally {
