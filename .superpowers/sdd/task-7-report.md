@@ -460,3 +460,94 @@ Results: diff check, both typechecks, and ESLint with zero warnings all passed.
   tests, and this report. No Task 8 behavior was added.
 
 Concerns: none.
+
+## Terminal Mutation Race Re-review Fix
+
+Status: DONE
+
+Closed the final two Task 7 races test-first.
+
+### RED Evidence
+
+```text
+/Users/jason8607/.nvm/versions/node/v24.18.0/bin/node \
+  node_modules/vitest/vitest.mjs run \
+  tests/integration/tasks/task-engine-run.test.ts \
+  tests/integration/tasks/task-engine-cancellation.test.ts \
+  -t "joins a concurrent distinct-key start|does not write when cancellation terminalizes during delayed event publish" \
+  --testTimeout=5000
+```
+
+RED: both selected tests failed. The delayed-publish test observed
+`must-not-write.txt` after cancellation had durably Failed. The concurrent second start
+rejected with `RUN_LIFECYCLE_ALREADY_EXISTS:task-1`, leaving its command pending.
+
+### Fix
+
+- `startApprovedTask` now checks for an existing task lifecycle before validating current
+  state or inserting an owner command. A distinct-key concurrent caller inserts its own
+  durable pending command, joins the existing lifecycle, completes that command with the
+  shared TaskRecord, and can replay it later.
+- A new owner reserves its lifecycle before inserting its pending command. No await exists
+  between reservation and command insertion, so another start cannot insert a command and
+  then fail lifecycle acquisition.
+- Normal run completion now settles the shared lifecycle after the owner's engine command
+  is durably completed. Cancellation/process-loss settlement remains authoritative when it
+  wins first.
+- Provider events retain the required persist-before-publish ordering. Immediately after
+  the awaited publish returns, TaskEngine re-reads the authoritative TaskRecord before any
+  workspace write, test/collaborator handling, terminal event handling, or later checkpoint
+  path can proceed.
+- Both the pre-publish and post-publish gates permit effects only in Working or
+  CancelRequested. Failed, Cancelled, and Interrupted tasks close the iterator, settle the
+  consumer, clear active supervision, and return without dispatching the effect.
+
+### GREEN and Verification Evidence
+
+Focused GREEN used the same command as RED.
+
+Result: 2/2 selected tests passed, with 28 skipped.
+
+Required regression:
+
+```text
+/Users/jason8607/.nvm/versions/node/v24.18.0/bin/node \
+  node_modules/vitest/vitest.mjs run \
+  tests/unit/providers/mock-provider.test.ts \
+  tests/integration/tasks/task-engine-cancellation.test.ts \
+  tests/integration/tasks/task-engine-run.test.ts \
+  --testTimeout=15000
+```
+
+Result: 3 files, 38 tests passed.
+
+Static verification:
+
+```text
+git diff --check
+/Users/jason8607/.nvm/versions/node/v24.18.0/bin/node \
+  node_modules/typescript/bin/tsc -p tsconfig.node.json --noEmit
+/Users/jason8607/.nvm/versions/node/v24.18.0/bin/node \
+  node_modules/typescript/bin/tsc -p tsconfig.renderer.json --noEmit
+/Users/jason8607/.nvm/versions/node/v24.18.0/bin/node \
+  node_modules/eslint/bin/eslint.js . --max-warnings=0
+```
+
+Results: diff check, both typechecks, and ESLint with zero warnings all passed.
+
+### Self-Review
+
+- Distinct-key followers never invoke Provider or Git work and own no second lifecycle.
+  Their durable command completes from the owner lifecycle and replay returns the same
+  result.
+- Lifecycle reservation happens before owner command insertion and is removed in the
+  existing `finally`; acquisition failure can no longer strand a newly inserted command.
+- The post-publish gate reads repositories only after publish returns and before branching
+  on every Provider event type. The delayed-publish test proves no workspace path or
+  checkpoint appears after terminalization.
+- Event durability remains before UI publish; the fix does not reorder or remove the
+  normalized `agent.run` record.
+- Changes are limited to Task 7 TaskEngine ordering/gating, fixture hooks, covering tests,
+  and this report. No Task 8 behavior was added.
+
+Concerns: none.

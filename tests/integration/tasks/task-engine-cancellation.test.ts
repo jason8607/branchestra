@@ -391,6 +391,55 @@ describe("TaskEngine cancellation and process loss", () => {
     }
   });
 
+  it("does not write when cancellation terminalizes during delayed event publish", async () => {
+    const publishEntered = Promise.withResolvers<void>();
+    const releasePublish = Promise.withResolvers<void>();
+    const fixture = await createTaskEngineFixture({
+      mockScript: [
+        {
+          type: "workspace.writeText",
+          relativePath: "must-not-write.txt",
+          contents: "too late\n"
+        },
+        { type: "waitForCancel" }
+      ],
+      maxRunMs: 20,
+      publishOverride(event) {
+        if (event.type === "agent.run"
+          && event.payload.event.type === "workspace.writeText") {
+          publishEntered.resolve();
+          return releasePublish.promise;
+        }
+      }
+    });
+    let running: Promise<unknown> | undefined;
+    try {
+      running = fixture.engine.startApprovedTask("task-1", "delayed-publish-start");
+      await publishEntered.promise;
+
+      const failed = await fixture.engine.cancel(
+        "task-1",
+        "timeout",
+        "delayed-publish-cancel"
+      );
+
+      expect(failed).toMatchObject({
+        state: "Failed",
+        failure: { code: "CANCEL_GRACE_TIMEOUT" }
+      });
+      await expect(fixture.leadPathExists("must-not-write.txt")).resolves.toBe(false);
+
+      releasePublish.resolve();
+      await expect(running).resolves.toEqual(failed);
+      await expect(fixture.leadPathExists("must-not-write.txt")).resolves.toBe(false);
+      expect(fixture.artifacts.listCheckpoints("task-1")).toHaveLength(0);
+    } finally {
+      releasePublish.resolve();
+      await running?.catch(() => undefined);
+      await fixture.cleanup();
+    }
+  });
+
   it.each(NON_TERMINAL_TASK_STATES)(
     "moves %s to Interrupted with the exact prior phase and collaboration count without Provider calls",
     async (state) => {

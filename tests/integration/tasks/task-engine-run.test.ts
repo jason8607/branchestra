@@ -159,6 +159,32 @@ describe("TaskEngine run", () => {
     }
   });
 
+  it("joins a concurrent distinct-key start and durably completes both commands", async () => {
+    const fixture = await createTaskEngineFixture({
+      mockScript: [{ type: "run.completed", summary: "shared" }]
+    });
+    let first: Promise<unknown> | undefined;
+    let second: Promise<unknown> | undefined;
+    try {
+      first = fixture.engine.startApprovedTask("task-1", "concurrent-first");
+      second = fixture.engine.startApprovedTask("task-1", "concurrent-second");
+
+      const [firstResult, secondResult] = await Promise.all([first, second]);
+
+      expect(secondResult).toEqual(firstResult);
+      expect(firstResult).toMatchObject({ state: "Checkpoint" });
+      expect(fixture.providerCalls().startRun).toBe(1);
+      expect(fixture.tasks.listRuns("task-1")).toHaveLength(1);
+      await expect(
+        fixture.engine.startApprovedTask("task-1", "concurrent-second")
+      ).resolves.toEqual(secondResult);
+    } finally {
+      await first?.catch(() => undefined);
+      await second?.catch(() => undefined);
+      await fixture.cleanup();
+    }
+  });
+
   it("rejects a new start after checkpoint without mutating the durable task", async () => {
     const fixture = await createTaskEngineFixture({
       mockScript: [{ type: "run.completed", summary: "once" }]

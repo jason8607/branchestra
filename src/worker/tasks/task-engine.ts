@@ -91,26 +91,47 @@ export class TaskEngine {
       requestHash
     );
     if (replay) return replay;
-    const current = this.options.repositories.tasks.getRequired(taskId);
-    if (current.state !== "Preparing") {
-      throw new Error(`TASK_NOT_PREPARING:${current.state}`);
-    }
-    this.options.repositories.tasks.beginEngineCommand({
-      idempotencyKey,
-      requestType,
-      requestHash,
-      workerGeneration: this.options.workerGeneration,
-      createdAt: this.options.now()
-    });
-    const lifecycle = this.createRunLifecycle(taskId);
-    try {
-      const result = await this.runApprovedTask(taskId, idempotencyKey, lifecycle);
+    const existingLifecycle = this.runLifecycles.get(taskId);
+    if (existingLifecycle) {
+      this.options.repositories.tasks.beginEngineCommand({
+        idempotencyKey,
+        requestType,
+        requestHash,
+        workerGeneration: this.options.workerGeneration,
+        createdAt: this.options.now()
+      });
+      const result = await existingLifecycle.terminal;
       this.options.repositories.tasks.completeEngineCommand(
         idempotencyKey,
         result,
         this.options.now()
       );
       return result;
+    }
+    const current = this.options.repositories.tasks.getRequired(taskId);
+    if (current.state !== "Preparing") {
+      throw new Error(`TASK_NOT_PREPARING:${current.state}`);
+    }
+    const lifecycle = this.createRunLifecycle(taskId);
+    try {
+      this.options.repositories.tasks.beginEngineCommand({
+        idempotencyKey,
+        requestType,
+        requestHash,
+        workerGeneration: this.options.workerGeneration,
+        createdAt: this.options.now()
+      });
+      const result = await this.runApprovedTask(taskId, idempotencyKey, lifecycle);
+      this.options.repositories.tasks.completeEngineCommand(
+        idempotencyKey,
+        result,
+        this.options.now()
+      );
+      lifecycle.settle(result);
+      return result;
+    } catch (error) {
+      lifecycle.settle(this.options.repositories.tasks.getRequired(taskId));
+      throw error;
     } finally {
       if (this.runLifecycles.get(taskId) === lifecycle) {
         this.runLifecycles.delete(taskId);
@@ -234,13 +255,21 @@ export class TaskEngine {
         if (emitted.value.done) break;
         const event = emitted.value.value;
         const durableTask = this.options.repositories.tasks.getRequired(task.id);
-        if (durableTask.state !== "Working"
-          && durableTask.state !== "CancelRequested") {
+        if (!this.providerSideEffectsAllowed(durableTask)) {
           closeConsumer();
+          lifecycle.settleConsumer();
+          this.activeRuns.delete(task.id);
           return durableTask;
         }
         run = this.options.repositories.tasks.getRun(run.id) ?? run;
         await this.recordProviderEvent(task, run, event);
+        const taskAfterPublish = this.options.repositories.tasks.getRequired(task.id);
+        if (!this.providerSideEffectsAllowed(taskAfterPublish)) {
+          closeConsumer();
+          lifecycle.settleConsumer();
+          this.activeRuns.delete(task.id);
+          return taskAfterPublish;
+        }
         if (event.type === "workspace.writeText") {
           await workspace.writeText(event.relativePath, event.contents);
         } else if (event.type === "test.request"
@@ -473,6 +502,10 @@ export class TaskEngine {
 
   private settleRunLifecycle(taskId: string, task: TaskRecord): void {
     this.runLifecycles.get(taskId)?.settle(task);
+  }
+
+  private providerSideEffectsAllowed(task: TaskRecord): boolean {
+    return task.state === "Working" || task.state === "CancelRequested";
   }
 
   private async raceRunLifecycle<T>(

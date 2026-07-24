@@ -129,6 +129,7 @@ export interface TaskEngineFixtureOptions {
   allowCollaborator?: boolean;
   maxRunMs?: number;
   providerOverride?: TaskProviderPort;
+  publishOverride?: (event: RoomEvent) => void | Promise<void>;
 }
 
 export async function createTaskEngineFixture(options: TaskEngineFixtureOptions) {
@@ -223,8 +224,9 @@ export async function createTaskEngineFixture(options: TaskEngineFixtureOptions)
     contextHash: `sha256:${"1".repeat(64)}`,
     id,
     now: base.now,
-    publish(event) {
+    async publish(event) {
       publishOrdering.push(base.events.all().some(({ id: eventId }) => eventId === event.id));
+      await options.publishOverride?.(event);
     }
   });
   const lead = () => artifacts.getWorktree("task-1", "lead");
