@@ -78,13 +78,18 @@ async function flushMessages(): Promise<void> {
 }
 
 async function waitForResponses(port: FakePort, count: number): Promise<void> {
-  for (let attempt = 0; attempt < 200; attempt += 1) {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
     const responses = port.sent.filter(
       (value) => WorkerResponseEnvelopeSchema.safeParse(value).success
     );
     if (responses.length >= count) return;
-    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
   }
+  const responseCount = port.sent.filter(
+    (value) => WorkerResponseEnvelopeSchema.safeParse(value).success
+  ).length;
+  throw new Error(`Timed out waiting for ${count} worker responses; observed ${responseCount}`);
 }
 
 describe("worker runtime lease", () => {

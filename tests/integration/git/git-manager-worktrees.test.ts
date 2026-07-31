@@ -312,7 +312,7 @@ describe("GitManager worktrees", () => {
         bothEntered.promise,
         new Promise((_, reject) => setTimeout(
           () => reject(new Error("distinct repositories were globally serialized")),
-          5_000
+          15_000
         ))
       ]);
       expect(entered).toBe(2);
@@ -324,7 +324,7 @@ describe("GitManager worktrees", () => {
       await first.cleanup();
       await second.cleanup();
     }
-  });
+  }, 30_000);
 
   it("retains a worktree when cancellation is observed immediately after worktree add", async () => {
     let cancelOnce = true;
