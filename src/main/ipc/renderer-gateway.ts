@@ -92,15 +92,21 @@ export function registerRendererGateway(dependencies: RendererGatewayDependencie
       case "room.replay":
       case "room.create":
       case "message.post":
+      case "task.get":
       case "task.approveScope":
+      case "task.cancel":
+      case "task.requestRevision":
       case "task.grantAdditionalRound":
+      case "task.approveFinalMerge":
+      case "task.recovery.preview":
+      case "task.recovery.resolve":
         workerRequest = WorkerRequestEnvelopeSchema.parse({
           ...request,
           workerGeneration: activeGeneration
         });
         break;
       default:
-        throw new Error(`Unsupported renderer command: ${request.type}`);
+        throw new Error("Unsupported renderer command");
     }
     const workerResponse = parseEnvelope(WorkerResponseEnvelopeSchema,
       await dependencies.supervisor.request(workerRequest)

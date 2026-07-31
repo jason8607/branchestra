@@ -233,21 +233,21 @@ export const TaskRecordSchema = z.object({
   failure: z.object({ code: z.string().min(1), message: z.string().min(1) }).strict().nullable(),
   version: NonNegativeIntegerSchema, createdAt: TimestampSchema, updatedAt: TimestampSchema
 }).strict();
-const AgentRunRecordSchema = z.object({
+export const AgentRunRecordSchema = z.object({
   id: z.string().min(1), taskId: z.string().min(1), provider: z.enum(["claude", "codex"]), role: z.enum(["lead", "collaborator", "reviewer"]),
   providerSessionId: z.string().min(1).nullable(), contextVersion: NonNegativeIntegerSchema, contextHash: Sha256Schema,
   state: z.enum(["starting", "running", "completed", "cancelled", "failed", "interrupted"]),
   startedAt: TimestampSchema, finishedAt: TimestampSchema.nullable()
 }).strict();
-const WorktreeRecordSchema = z.object({
+export const WorktreeRecordSchema = z.object({
   id: z.string().min(1), taskId: z.string().min(1), role: z.enum(["lead", "collaborator"]), pathRealpath: z.string().min(1),
   branchRef: z.string().min(1), baseOid: GitOidSchema, currentCheckpointOid: GitOidSchema.nullable(), retained: z.literal(true), createdAt: TimestampSchema
 }).strict();
-const CheckpointRecordSchema = z.object({
+export const CheckpointRecordSchema = z.object({
   id: z.string().min(1), taskId: z.string().min(1), worktreeId: z.string().min(1), authorProvider: z.enum(["claude", "codex"]),
   purpose: z.enum(["implementation", "review", "revision", "candidate"]), oid: GitOidSchema, immutableRef: z.string().min(1), createdAt: TimestampSchema
 }).strict();
-const TestResultRecordSchema = z.object({
+export const TestResultRecordSchema = z.object({
   id: z.string().min(1), taskId: z.string().min(1), candidateId: z.string().min(1), commandId: z.string().min(1),
   executableRealpath: z.string().min(1), argv: z.array(z.string()), exitCode: z.number().int(), stdoutHash: Sha256Schema,
   stderrHash: Sha256Schema, durationMs: NonNegativeIntegerSchema, logReference: z.string().min(1), createdAt: TimestampSchema
@@ -256,7 +256,7 @@ const JsonValueSchema: z.ZodType<JsonValue> = z.lazy(() => z.union([
   z.string(), z.number(), z.boolean(), z.null(), z.array(JsonValueSchema), z.record(z.string(), JsonValueSchema)
 ]));
 const GitDiffFileSummarySchema = z.object({ path: z.string().min(1), status: z.string().min(1), additions: NonNegativeIntegerSchema, deletions: NonNegativeIntegerSchema }).strict();
-const IntegrationCandidateSchema = z.object({
+export const IntegrationCandidateSchema = z.object({
   id: z.string().min(1), taskId: z.string().min(1), leadWorktreeId: z.string().min(1), targetRef: TargetRefSchema,
   baseOid: GitOidSchema, candidateOid: GitOidSchema, immutableRef: z.string().min(1), diffHash: Sha256Schema, testSetHash: Sha256Schema,
   diffSummary: z.object({ filesChanged: NonNegativeIntegerSchema, additions: NonNegativeIntegerSchema, deletions: NonNegativeIntegerSchema, files: z.array(GitDiffFileSummarySchema) }).strict(),
@@ -268,7 +268,7 @@ const RecoveryOperationPreviewSchema = z.object({
   operationId: z.string().min(1), operationType: z.string().min(1), outcome: z.enum(["not_applied", "applied", "conflict", "uncertain"]),
   expected: z.record(z.string(), JsonValueSchema), actual: z.record(z.string(), JsonValueSchema)
 }).strict();
-const RecoveryPreviewSchema = z.object({
+export const RecoveryPreviewSchema = z.object({
   taskId: z.string().min(1), recordedPhase: NonTerminalTaskStateSchema.nullable(), repositoryAvailable: z.boolean(),
   worktrees: z.array(WorktreeRecordSchema), checkpoints: z.array(CheckpointRecordSchema), dirtyPaths: z.array(z.string()),
   providerSessionResumable: z.boolean(), operations: z.array(RecoveryOperationPreviewSchema), previewHash: Sha256Schema, createdAt: TimestampSchema
@@ -282,6 +282,17 @@ const TaskProviderEventSummarySchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("run.completed"), summary: z.string() }).strict(),
   z.object({ type: z.literal("run.failed"), code: z.string().min(1), message: z.string().min(1) }).strict()
 ]);
+
+export const TaskInspectorModelSchema = z.object({
+  task: TaskRecordSchema,
+  scopeReceipt: ApprovalReceiptSchema.nullable(),
+  activeRuns: z.array(AgentRunRecordSchema),
+  worktrees: z.array(WorktreeRecordSchema),
+  checkpoints: z.array(CheckpointRecordSchema),
+  candidate: IntegrationCandidateSchema.nullable(),
+  pendingApproval: ApprovalRequestSchema.nullable(),
+  recovery: RecoveryPreviewSchema.nullable()
+}).strict() as z.ZodType<TaskInspectorModel>;
 
 const roomEvent = <const TType extends string, T extends z.ZodType>(type: TType, payload: T) => z.object({
   id: UuidSchema, roomId: UuidSchema, roomSeq: z.number().int().positive(), type: z.literal(type),
@@ -328,10 +339,10 @@ export const RoomEventSchema = z.union([
 ]) as z.ZodType<RoomEvent>;
 
 export const AppSnapshotSchema = z.object({
-  projects: z.array(ProjectSchema), rooms: z.array(RoomSchema), roomCursors: z.record(UuidSchema, NonNegativeIntegerSchema)
+  projects: z.array(ProjectSchema), rooms: z.array(RoomSchema), tasks: z.array(TaskInspectorModelSchema), roomCursors: z.record(UuidSchema, NonNegativeIntegerSchema)
 }).strict();
 export const SnapshotPageSchema = z.object({
-  snapshotId: UuidSchema, projects: z.array(ProjectSchema), rooms: z.array(RoomSchema), roomCursors: z.record(UuidSchema, NonNegativeIntegerSchema),
+  snapshotId: UuidSchema, projects: z.array(ProjectSchema), rooms: z.array(RoomSchema), tasks: z.array(TaskInspectorModelSchema), roomCursors: z.record(UuidSchema, NonNegativeIntegerSchema),
   nextCursor: NonNegativeIntegerSchema, hasMore: z.boolean()
 }).strict();
 export const RoomEventCursorSchema = z.object({ roomId: UuidSchema, roomSeq: NonNegativeIntegerSchema, limit: z.number().int().min(1).max(500) }).strict();

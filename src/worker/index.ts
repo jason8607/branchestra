@@ -26,5 +26,8 @@ void startWorker({
     startIdentity: environment.startIdentity
   },
   leaseTtlMs: 5_000,
-  heartbeatIntervalMs: 1_000
+  heartbeatIntervalMs: 1_000,
+  ...(environment.e2eMockScenario
+    ? { e2eMock: { enabled: true as const, scenario: environment.e2eMockScenario } }
+    : {})
 });

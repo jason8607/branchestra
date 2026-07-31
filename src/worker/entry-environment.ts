@@ -6,6 +6,7 @@ export interface WorkerEntryEnvironment {
   ownerInstanceId: string;
   workerGeneration: string;
   startIdentity: string;
+  e2eMockScenario?: "two-round-success" | "interrupted-run";
 }
 
 const UuidSchema = z.string().uuid();
@@ -23,10 +24,15 @@ function required(environment: Record<string, string | undefined>, name: string)
 export function parseWorkerEnvironment(environment: Record<string, string | undefined>): WorkerEntryEnvironment {
   const dbPath = required(environment, "BRANCHESTRA_DB_PATH");
   if (dbPath.trim().length === 0) throw new Error("BRANCHESTRA_DB_PATH must not be blank");
+  const scenario = environment.BRANCHESTRA_E2E_MOCK_SCENARIO;
+  if (scenario !== undefined && scenario !== "two-round-success" && scenario !== "interrupted-run") {
+    throw new Error("BRANCHESTRA_E2E_MOCK_SCENARIO is invalid");
+  }
   return {
     dbPath,
     ownerInstanceId: UuidSchema.parse(required(environment, "BRANCHESTRA_OWNER_INSTANCE_ID")),
     workerGeneration: ActiveGenerationSchema.parse(required(environment, "BRANCHESTRA_WORKER_GENERATION")),
-    startIdentity: UuidSchema.parse(required(environment, "BRANCHESTRA_WORKER_START_IDENTITY"))
+    startIdentity: UuidSchema.parse(required(environment, "BRANCHESTRA_WORKER_START_IDENTITY")),
+    ...(scenario ? { e2eMockScenario: scenario } : {})
   };
 }

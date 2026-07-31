@@ -78,10 +78,12 @@ function timelineState(): TimelineState {
     snapshot: {
       projects: [project()],
       rooms: [room()],
+      tasks: [],
       roomCursors: { [ROOM_ID]: 1 }
     },
     selectedProjectId: PROJECT_ID,
     selectedRoomId: ROOM_ID,
+    selectedTaskId: null,
     eventsByRoom: { [ROOM_ID]: [messageEvent()] },
     error: null
   };
@@ -94,6 +96,7 @@ function preloadedTimelineStore(): TimelineStore {
     subscribe: () => () => undefined,
     hydrate: vi.fn().mockResolvedValue(undefined),
     selectRoom: vi.fn().mockResolvedValue(undefined),
+    selectTask: vi.fn(),
     addProject: vi.fn().mockResolvedValue(undefined),
     createRoom: vi.fn().mockResolvedValue(undefined),
     postMessage: vi.fn().mockResolvedValue(undefined),
@@ -273,6 +276,7 @@ describe("renderer shell", () => {
       snapshot: {
         projects: [project(), addedProject],
         rooms: [room()],
+        tasks: [],
         roomCursors: { [ROOM_ID]: 1 }
       },
       selectedProjectId: addedProject.id,

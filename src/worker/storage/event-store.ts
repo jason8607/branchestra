@@ -2,7 +2,8 @@ import type {
   AppSnapshot,
   RoomEvent,
   RoomEventCursor,
-  RoomEventPage
+  RoomEventPage,
+  TaskInspectorModel
 } from "../../shared/contracts/domain";
 import {
   AppSnapshotSchema,
@@ -26,11 +27,22 @@ export interface EventStore {
   after(cursor: RoomEventCursor): RoomEventPage;
 }
 
+export interface TaskSnapshotSource {
+  list(): TaskInspectorModel[];
+}
+
 const canonicalStores = new WeakMap<
   EventStoreRepositories,
   { database: Database; store: EventStore }
 >();
 const storeDatabases = new WeakMap<EventStore, Database>();
+const taskSnapshotSources = new WeakMap<EventStore, { source: TaskSnapshotSource }>();
+
+export function setTaskSnapshotSource(store: EventStore, source: TaskSnapshotSource): void {
+  const holder = taskSnapshotSources.get(store);
+  if (!holder) throw new Error("TASK_SNAPSHOT_SOURCE_STORE_UNKNOWN");
+  holder.source = source;
+}
 
 export function assertCanonicalEventStore(database: Database, store: EventStore): void {
   const storeDatabase = storeDatabases.get(store);
@@ -38,12 +50,18 @@ export function assertCanonicalEventStore(database: Database, store: EventStore)
   if (storeDatabase !== database) throw new Error("TASK_EVENT_STORE_DATABASE_MISMATCH");
 }
 
-export function createEventStore(database: Database, repositories: EventStoreRepositories): EventStore {
+export function createEventStore(
+  database: Database,
+  repositories: EventStoreRepositories,
+  taskSnapshotSource?: TaskSnapshotSource
+): EventStore {
   const canonical = canonicalStores.get(repositories);
   if (canonical) {
     if (canonical.database !== database) throw new Error("EVENT_STORE_DATABASE_MISMATCH");
+    if (taskSnapshotSource) taskSnapshotSources.get(canonical.store)!.source = taskSnapshotSource;
     return canonical.store;
   }
+  const taskSourceHolder = { source: taskSnapshotSource ?? { list: () => [] } };
   const store: EventStore = {
     append(input) {
       return database.transaction(() => {
@@ -68,6 +86,7 @@ export function createEventStore(database: Database, repositories: EventStoreRep
         return AppSnapshotSchema.parse({
           projects: repositories.projects.list(),
           rooms,
+          tasks: taskSourceHolder.source.list(),
           roomCursors
         });
       });
@@ -104,6 +123,7 @@ export function createEventStore(database: Database, repositories: EventStoreRep
     }
   };
   storeDatabases.set(store, database);
+  taskSnapshotSources.set(store, taskSourceHolder);
   canonicalStores.set(repositories, { database, store });
   return store;
 }

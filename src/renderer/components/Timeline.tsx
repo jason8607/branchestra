@@ -1,7 +1,19 @@
 import React from "react";
 import type { RoomEvent } from "../../shared/contracts/domain";
 
-export function Timeline(props: { events: readonly RoomEvent[] }): React.JSX.Element {
+function taskId(event: RoomEvent): string | null {
+  if (event.type === "task.created") return event.payload.task.id;
+  if ("taskId" in event.payload && typeof event.payload.taskId === "string") return event.payload.taskId;
+  if (event.type === "candidate.created") return event.payload.candidate.taskId;
+  if (event.type === "approval.requested") return event.payload.request.taskId;
+  if (event.type === "approval.decided") return event.payload.receipt.taskId;
+  return null;
+}
+
+export function Timeline(props: {
+  events: readonly RoomEvent[];
+  onSelectTask?(taskId: string): void;
+}): React.JSX.Element {
   if (props.events.length === 0) {
     return (
       <section className="timeline" data-testid="shared-timeline" aria-label="Shared timeline">
@@ -23,6 +35,9 @@ export function Timeline(props: { events: readonly RoomEvent[] }): React.JSX.Ele
                 </span>
               </header>
               <p className="event-body">{event.type === "message.posted" ? event.payload.body : event.type}</p>
+              {taskId(event) ? (
+                <button type="button" onClick={() => props.onSelectTask?.(taskId(event)!)}>Open task</button>
+              ) : null}
             </article>
           </li>
         ))}

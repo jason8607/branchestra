@@ -29,7 +29,7 @@ function snapshotResponse(request: RendererRequestEnvelope, workerGeneration = g
     payload: {
       ok: true as const,
       requestType: "state.getSnapshot",
-      data: { projects: [], rooms: [], roomCursors: {} },
+      data: { projects: [], rooms: [], tasks: [], roomCursors: {} },
       replayed: false
     }
   };

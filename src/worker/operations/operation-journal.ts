@@ -170,6 +170,18 @@ export class OperationJournal {
     return (rows as unknown as OperationRow[]).map((row) => mapOperation(row));
   }
 
+  reconcile(
+    id: string,
+    observation: Record<string, unknown>,
+    outcome: "applied" | "not_applied" | "conflict" | "uncertain"
+  ): void {
+    const current = this.getRequired(id);
+    if (current.status === "completed") return;
+    this.db.prepare(
+      "UPDATE operation_journal SET status = ?, observation_json = ? WHERE id = ? AND status <> 'completed'"
+    ).run(outcome === "applied" ? "completed" : "needs_attention", canonicalJson({ outcome, actual: observation }), id);
+  }
+
   private getRequired(id: string): OperationRecord {
     const row = this.db.prepare(`SELECT ${OPERATION_COLUMNS} FROM operation_journal WHERE id = ?`)
       .get(id) as OperationRow | undefined;

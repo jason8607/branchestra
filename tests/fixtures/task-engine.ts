@@ -11,13 +11,20 @@ import type {
   TaskRecord
 } from "../../src/shared/contracts/domain";
 import { hashCanonical } from "../../src/worker/approvals/canonical-json";
+import { ApprovedCommandRunner } from "../../src/worker/approvals/approved-command-runner";
+import {
+  FinalApprovalService,
+  GitCandidateTupleSource
+} from "../../src/worker/approvals/final-approval-service";
 import { CollaborationCoordinator } from "../../src/worker/tasks/collaboration-coordinator";
 import { GitArtifactRepository } from "../../src/worker/git/git-artifact-repository";
 import { GitCommandRunner } from "../../src/worker/git/git-command-runner";
 import { GitManager } from "../../src/worker/git/git-manager";
 import { IntegrationService } from "../../src/worker/git/integration-service";
+import { MergeService } from "../../src/worker/git/merge-service";
 import { GitReadService } from "../../src/worker/git/repository-inspector";
 import { JournaledOperationRunner } from "../../src/worker/operations/journaled-operation-runner";
+import { JournaledProcessRunner } from "../../src/worker/operations/journaled-process-runner";
 import { RepositoryLock } from "../../src/worker/operations/repository-lock";
 import {
   MockProvider,
@@ -28,6 +35,7 @@ import type {
   TaskProviderRunRequest
 } from "../../src/worker/tasks/provider-port";
 import { TaskEngine } from "../../src/worker/tasks/task-engine";
+import { CandidateService } from "../../src/worker/tasks/candidate-service";
 import { TaskService } from "../../src/worker/tasks/task-service";
 import { transitionTask } from "../../src/worker/tasks/task-state-machine";
 import { createEventStore } from "../../src/worker/storage/event-store";
@@ -775,6 +783,160 @@ export async function createIntegrationFixture(options: IntegrationFixtureOption
           return typeof value === "function" ? value.bind(target) : value;
         }
       });
+    }
+  };
+}
+
+export async function createCandidateFixture() {
+  const base = await createTaskEngineFixture({
+    mockScript: [],
+    initialState: "Review2",
+    commandClasses: ["test"],
+    maxRunMs: 5_000
+  });
+  const lead = await base.prepareLead("candidate-lead");
+  await base.repository.writeAt(lead.pathRealpath, "greeting.txt", "hello candidate\n");
+  const checkpoint = await base.manager.createCheckpoint({
+    projectId: base.project.id,
+    taskId: "task-1",
+    worktree: lead,
+    authorProvider: "claude",
+    purpose: "revision",
+    message: "Candidate revision",
+    checkpointId: "lead-revision",
+    workerGeneration: base.generation,
+    idempotencyKey: "candidate-checkpoint"
+  });
+  const processRunner = new JournaledProcessRunner({
+    journal: base.repositories.operations,
+    id: base.id,
+    now: base.now,
+    terminationGraceMs: 100
+  });
+  const catalog = {
+    get(projectId: string, commandId: string) {
+      if (projectId !== base.project.id || commandId !== "unit") return null;
+      return {
+        commandId: "unit",
+        commandClass: "test" as const,
+        displayName: "Unit tests",
+        executableRealpath: process.execPath,
+        argv: ["-e", "process.stdout.write('tests passed')"],
+        cwdRealpath: lead.pathRealpath,
+        timeoutMs: 5_000,
+        network: "none" as const
+      };
+    }
+  };
+  const commandRunner = new ApprovedCommandRunner({
+    catalog,
+    processes: processRunner,
+    id: base.id,
+    now: base.now
+  });
+  const git = new GitCommandRunner();
+  const candidates = new CandidateService({
+    tasks: base.tasks,
+    approvals: base.repositories.approvals,
+    artifacts: base.artifacts,
+    projects: base.repositories.projects,
+    manager: base.manager,
+    git,
+    commands: commandRunner,
+    events: base.eventStore,
+    id: base.id,
+    now: base.now
+  });
+
+  return {
+    ...base,
+    candidates,
+    checkpoint,
+    catalog,
+    gitRunner: git,
+    async git(...argv: string[]) {
+      return (await base.repository.run(argv)).stdout.trim();
+    }
+  };
+}
+
+export async function createFinalMergeFixture(options: {
+  targetCheckedOut: boolean;
+  dirty?: boolean;
+}) {
+  const base = await createCandidateFixture();
+  const candidate = await base.candidates.buildVerifiedCandidate({
+    taskId: "task-1",
+    selectedCheckpointIds: [base.checkpoint.id],
+    testCommandIds: ["unit"],
+    unresolved: [],
+    workerGeneration: base.generation,
+    idempotencyKey: "final-candidate"
+  });
+  if (!options.targetCheckedOut) {
+    await base.repository.run(["checkout", "--detach", base.repository.initialOid]);
+  }
+  if (options.dirty) {
+    await base.repository.write("dirty-user-file.txt", "do not overwrite\n");
+  }
+  const tupleSource = new GitCandidateTupleSource({
+    tasks: base.tasks,
+    artifacts: base.artifacts,
+    projects: base.repositories.projects,
+    manager: base.manager,
+    git: base.gitRunner
+  });
+  const finalApproval = new FinalApprovalService({
+    tasks: base.tasks,
+    approvals: base.repositories.approvals,
+    events: base.eventStore,
+    tupleSource,
+    candidates: { get: (candidateId) => base.artifacts.getCandidate(candidateId) },
+    workerGeneration: base.generation,
+    id: base.id,
+    now: base.now
+  });
+  const request = await finalApproval.request("task-1", "final-request");
+  if (request.kind !== "final_merge") throw new Error("FINAL_REQUEST_TYPE_MISMATCH");
+  const approval = await finalApproval.approve({
+    taskId: "task-1",
+    approvalRequestId: request.id,
+    displayed: request.scope,
+    workerGeneration: base.generation,
+    idempotencyKey: "final-approve"
+  });
+  const readService = new GitReadService(base.gitRunner);
+  const merge = new MergeService({
+    finalApproval,
+    tasks: base.tasks,
+    projects: base.repositories.projects,
+    manager: base.manager,
+    readService,
+    events: base.eventStore,
+    id: base.id,
+    now: base.now
+  });
+
+  return {
+    ...base,
+    candidate,
+    finalApproval,
+    approval,
+    merge,
+    async targetOid() {
+      return (await base.repository.run(["rev-parse", "refs/heads/main"])).stdout.trim();
+    },
+    async ownerHeadOid() {
+      return (await base.repository.run(["rev-parse", "HEAD"])).stdout.trim();
+    },
+    async advanceTargetExternally() {
+      if (options.targetCheckedOut) throw new Error("EXTERNAL_ADVANCE_REQUIRES_UNOWNED_TARGET");
+      await base.repository.write("external.txt", "external\n");
+      await base.repository.run(["add", "--", "external.txt"]);
+      await base.repository.run(["commit", "--no-gpg-sign", "-m", "External advance"]);
+      const externalOid = (await base.repository.run(["rev-parse", "HEAD"])).stdout.trim();
+      await base.repository.run(["update-ref", "refs/heads/main", externalOid, base.repository.initialOid]);
+      return externalOid;
     }
   };
 }

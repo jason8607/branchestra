@@ -244,6 +244,13 @@ export class GitArtifactRepository {
     });
   }
 
+  persistCandidate(candidate: IntegrationCandidate): void {
+    this.db.transaction(() => {
+      this.insertCandidate(candidate, candidate.selectedCheckpointIds);
+      for (const result of candidate.testResults) this.insertTestResult(result);
+    });
+  }
+
   getCandidate(candidateId: string): IntegrationCandidate | null {
     const row = this.db.prepare(`SELECT ${CANDIDATE_COLUMNS} FROM integration_candidates WHERE id = ?`)
       .get(candidateId) as CandidateRow | undefined;

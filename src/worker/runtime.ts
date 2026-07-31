@@ -1,7 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { dirname, resolve } from "node:path";
+import { mkdir, realpath } from "node:fs/promises";
 import { z } from "zod";
 import { hashCanonical } from "./approvals/canonical-json";
+import { FinalApprovalService, GitCandidateTupleSource } from "./approvals/final-approval-service";
+import { ApprovedCommandRunner } from "./approvals/approved-command-runner";
 import { RoomEventSchema } from "../shared/contracts/domain";
 import {
   assertEnvelopeSize,
@@ -17,20 +20,29 @@ import { inspectExistingRepository } from "./git/inspect-repository";
 import { GitCommandRunner } from "./git/git-command-runner";
 import { GitArtifactRepository } from "./git/git-artifact-repository";
 import { GitManager } from "./git/git-manager";
+import { GitOperationReconciler } from "./git/git-operation-reconciler";
+import { MergeService } from "./git/merge-service";
 import { GitReadService } from "./git/repository-inspector";
 import { JournaledOperationRunner } from "./operations/journaled-operation-runner";
+import { JournaledProcessRunner } from "./operations/journaled-process-runner";
 import { RepositoryLock } from "./operations/repository-lock";
 import { createDefaultTaskProvider } from "./providers/unavailable-provider";
+import { MockProvider } from "./providers/mock-provider";
+import { e2eMockScript, type E2EMockScenario } from "./providers/e2e-mock-scenarios";
 import { createCommandHandlers } from "./protocol/handlers";
 import { createWorkerRouter } from "./protocol/worker-router";
 import { openDatabase } from "./storage/database";
-import { createEventStore } from "./storage/event-store";
+import { createEventStore, setTaskSnapshotSource } from "./storage/event-store";
 import { createIdempotencyStore } from "./storage/idempotency-store";
 import { runMigrations } from "./storage/migrations";
 import { createRepositories } from "./storage/repositories";
 import { createWorkerLeaseStore, type WorkerIdentity } from "./storage/worker-lease-store";
 import { TaskService } from "./tasks/task-service";
 import { createTaskExecutionServices } from "./tasks/task-execution-services";
+import { CandidateService } from "./tasks/candidate-service";
+import { E2EMockWorkflow } from "./tasks/e2e-mock-workflow";
+import { RecoveryCoordinator } from "./tasks/recovery-coordinator";
+import { createTaskCommandHandlers, TaskInspectorQuery } from "./tasks/task-command-handlers";
 
 export interface WorkerPort {
   postMessage(value: unknown): void;
@@ -43,6 +55,10 @@ export interface WorkerStartOptions {
   identity: WorkerIdentity;
   leaseTtlMs: number;
   heartbeatIntervalMs: number;
+  e2eMock?: {
+    enabled: true;
+    scenario: E2EMockScenario;
+  };
 }
 
 export interface WorkerRuntime {
@@ -98,6 +114,7 @@ function stoppedRuntime(): WorkerRuntime {
 }
 
 export async function startWorker(options: WorkerStartOptions): Promise<WorkerRuntime> {
+  if (options.e2eMock && options.e2eMock.enabled !== true) throw new Error("MOCK_PROVIDER_DISABLED");
   const database = openDatabase(options.dbPath);
   let leaseHeld = false;
   const leaseStore = (() => {
@@ -188,7 +205,9 @@ export async function startWorker(options: WorkerStartOptions): Promise<WorkerRu
     const roomService = createRoomService({ repositories, eventStore, idempotencyStore, clock, ids });
     const git = new GitCommandRunner();
     const gitReadService = new GitReadService(git);
-    const managedWorktreeRoot = resolve(dirname(options.dbPath), "managed-worktrees");
+    const managedWorktreeRootPath = resolve(dirname(options.dbPath), "managed-worktrees");
+    await mkdir(managedWorktreeRootPath, { recursive: true });
+    const managedWorktreeRoot = await realpath(managedWorktreeRootPath);
     const taskService = new TaskService({
       repositories,
       eventStore,
@@ -214,7 +233,32 @@ export async function startWorker(options: WorkerStartOptions): Promise<WorkerRu
       id: ids.next,
       now: clock.now
     });
-    const provider = createDefaultTaskProvider();
+    const publishRoomEvent = (
+      event: z.infer<typeof RoomEventSchema>,
+      requestId: string = randomUUID()
+    ): void => {
+      postEnvelope(options.port.postMessage.bind(options.port), WorkerEventEnvelopeSchema.parse({
+        v: PROTOCOL_VERSION,
+        requestId,
+        idempotencyKey: event.id,
+        workerGeneration: options.identity.workerGeneration,
+        type: "room.event",
+        payload: event
+      }));
+    };
+    const invalidateState = (): void => {
+      postEnvelope(options.port.postMessage.bind(options.port), WorkerEventEnvelopeSchema.parse({
+        v: PROTOCOL_VERSION,
+        requestId: randomUUID(),
+        idempotencyKey: `state-invalidated:${randomUUID()}`,
+        workerGeneration: options.identity.workerGeneration,
+        type: "state.invalidated",
+        payload: { roomId: null }
+      }));
+    };
+    const provider = options.e2eMock
+      ? new MockProvider((request) => e2eMockScript(options.e2eMock!.scenario, request))
+      : createDefaultTaskProvider();
     const taskExecutionServices = createTaskExecutionServices({
       repositories,
       artifacts,
@@ -229,7 +273,120 @@ export async function startWorker(options: WorkerStartOptions): Promise<WorkerRu
         workerGeneration: options.identity.workerGeneration
       }),
       id: ids.next,
+      now: clock.now,
+      publish: publishRoomEvent
+    });
+    const finalApproval = new FinalApprovalService({
+      tasks: repositories.tasks,
+      approvals: repositories.approvals,
+      events: eventStore,
+      tupleSource: new GitCandidateTupleSource({
+        tasks: repositories.tasks,
+        artifacts,
+        projects: repositories.projects,
+        manager,
+        git
+      }),
+      candidates: { get: (candidateId) => artifacts.getCandidate(candidateId) },
+      workerGeneration: options.identity.workerGeneration,
+      id: ids.next,
       now: clock.now
+    });
+    const processes = new JournaledProcessRunner({
+      journal: repositories.operations,
+      id: ids.next,
+      now: clock.now
+    });
+    const commands = new ApprovedCommandRunner({
+      catalog: {
+        get(projectId, commandId) {
+          if (!options.e2eMock || commandId !== "unit") return null;
+          const task = repositories.tasks.listNonTerminal().find((candidate) => candidate.projectId === projectId);
+          if (!task) return null;
+          const lead = artifacts.getWorktree(task.id, "lead");
+          if (!lead) return null;
+          return {
+            commandId: "unit",
+            displayName: "E2E unit test",
+            commandClass: "test",
+            executableRealpath: "/usr/bin/true",
+            argv: [],
+            cwdRealpath: lead.pathRealpath,
+            timeoutMs: 5_000,
+            network: "none"
+          };
+        }
+      },
+      processes,
+      id: ids.next,
+      now: clock.now
+    });
+    const candidates = new CandidateService({
+      tasks: repositories.tasks,
+      approvals: repositories.approvals,
+      artifacts,
+      projects: repositories.projects,
+      manager,
+      git,
+      commands,
+      events: eventStore,
+      id: ids.next,
+      now: clock.now
+    });
+    const recovery = new RecoveryCoordinator({
+      tasks: repositories.tasks,
+      approvals: repositories.approvals,
+      operations: repositories.operations,
+      artifacts,
+      projects: repositories.projects,
+      reconciler: new GitOperationReconciler({ projects: repositories.projects, git }),
+      events: eventStore,
+      workerGeneration: options.identity.workerGeneration,
+      id: ids.next,
+      now: clock.now
+    });
+    await recovery.markInterruptedAfterGenerationChange("", options.identity.workerGeneration);
+    const inspector = new TaskInspectorQuery({
+      tasks: repositories.tasks,
+      approvals: repositories.approvals,
+      artifacts,
+      recovery
+    });
+    setTaskSnapshotSource(eventStore, inspector);
+    const merge = new MergeService({
+      finalApproval,
+      tasks: repositories.tasks,
+      projects: repositories.projects,
+      manager,
+      readService: gitReadService,
+      events: eventStore,
+      id: ids.next,
+      now: clock.now
+    });
+    const taskWorkflow = options.e2eMock
+      ? new E2EMockWorkflow({
+          scenario: options.e2eMock.scenario,
+          engine: taskExecutionServices.engine,
+          collaboration: taskExecutionServices.collaboration,
+          candidates,
+          finalApproval,
+          tasks: repositories.tasks,
+          artifacts,
+          manager,
+          workerGeneration: options.identity.workerGeneration,
+          id: ids.next,
+          invalidate: invalidateState
+        })
+      : undefined;
+    const taskCommandHandlers = createTaskCommandHandlers({
+      workerGeneration: options.identity.workerGeneration,
+      taskService,
+      taskEngine: taskExecutionServices.engine,
+      finalApproval,
+      merge,
+      recovery,
+      inspector,
+      ...(taskWorkflow ? { taskWorkflow } : {})
     });
     const router = createWorkerRouter({
       workerGeneration: options.identity.workerGeneration,
@@ -238,6 +395,7 @@ export async function startWorker(options: WorkerStartOptions): Promise<WorkerRu
         roomService,
         taskService,
         taskExecutionServices,
+        taskCommandHandlers,
         prepareQuit: runtime.prepareQuit
       })
     });
@@ -267,14 +425,9 @@ export async function startWorker(options: WorkerStartOptions): Promise<WorkerRu
           postEnvelope(options.port.postMessage.bind(options.port), response);
           if (response.payload.ok && response.payload.requestType === "message.post" && !response.payload.replayed) {
             const event = RoomEventSchema.parse(response.payload.data);
-            postEnvelope(options.port.postMessage.bind(options.port), WorkerEventEnvelopeSchema.parse({
-              v: PROTOCOL_VERSION,
-              requestId: request.requestId,
-              idempotencyKey: event.id,
-              workerGeneration: options.identity.workerGeneration,
-              type: "room.event",
-              payload: event
-            }));
+            publishRoomEvent(event, request.requestId);
+            const created = eventStore.after({ roomId: event.roomId, roomSeq: event.roomSeq, limit: 50 });
+            for (const later of created.events) publishRoomEvent(later);
           }
         } catch {
           stopQuietly();

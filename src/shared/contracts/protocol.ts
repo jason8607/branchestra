@@ -7,6 +7,7 @@ import {
   RoomEventSchema,
   RoomSchema,
   SnapshotPageSchema,
+  TaskInspectorModelSchema,
   TaskRecordSchema
 } from "./domain";
 import type { FinalApprovalTuple } from "./domain";
@@ -93,12 +94,18 @@ export const WorkerRequestEnvelopeSchema = z.discriminatedUnion("type", [
   z.object({ ...base, type: z.literal("project.addExisting"), payload: z.object({ selectedPath: z.string().min(1) }).strict() }).strict(),
   z.object({ ...base, type: z.literal("room.create"), payload: roomCreate }).strict(),
   z.object({ ...base, type: z.literal("message.post"), payload: messagePost }).strict(),
+  z.object({ ...base, type: z.literal("task.get"), payload: taskGet }).strict(),
   z.object({ ...base, type: z.literal("task.approveScope"), payload: taskApproveScope }).strict(),
+  z.object({ ...base, type: z.literal("task.cancel"), payload: taskCancel }).strict(),
+  z.object({ ...base, type: z.literal("task.requestRevision"), payload: taskRequestRevision }).strict(),
   z.object({ ...base, type: z.literal("task.grantAdditionalRound"), payload: taskGrantAdditionalRound }).strict(),
+  z.object({ ...base, type: z.literal("task.approveFinalMerge"), payload: taskApproveFinalMerge }).strict(),
+  z.object({ ...base, type: z.literal("task.recovery.preview"), payload: taskGet }).strict(),
+  z.object({ ...base, type: z.literal("task.recovery.resolve"), payload: taskRecoveryResolve }).strict(),
   z.object({ ...base, type: z.literal("worker.prepareQuit"), payload: z.object({ deadlineMs: z.number().int().positive() }).strict() }).strict()
 ]);
 
-const responseData = z.union([AppSnapshotSchema, SnapshotPageSchema, RoomEventPageSchema, ProjectSchema, RoomSchema, RoomEventSchema, TaskRecordSchema, z.object({ cancelled: z.literal(true) }).strict(), z.object({ prepared: z.literal(true) }).strict()]);
+const responseData = z.union([AppSnapshotSchema, SnapshotPageSchema, RoomEventPageSchema, ProjectSchema, RoomSchema, RoomEventSchema, TaskRecordSchema, TaskInspectorModelSchema, z.object({ cancelled: z.literal(true) }).strict(), z.object({ prepared: z.literal(true) }).strict()]);
 export const WorkerResponseEnvelopeSchema = z.object({
   ...base,
   type: z.literal("response"),

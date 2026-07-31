@@ -91,7 +91,19 @@ function commandFromEnvelope(envelope: WorkerRequestEnvelope): WorkerCommand {
       return { type: envelope.type, payload: envelope.payload };
     case "task.approveScope":
       return { type: envelope.type, payload: envelope.payload };
+    case "task.get":
+      return { type: envelope.type, payload: envelope.payload };
+    case "task.cancel":
+      return { type: envelope.type, payload: envelope.payload };
+    case "task.requestRevision":
+      return { type: envelope.type, payload: envelope.payload };
     case "task.grantAdditionalRound":
+      return { type: envelope.type, payload: envelope.payload };
+    case "task.approveFinalMerge":
+      return { type: envelope.type, payload: envelope.payload };
+    case "task.recovery.preview":
+      return { type: envelope.type, payload: envelope.payload };
+    case "task.recovery.resolve":
       return { type: envelope.type, payload: envelope.payload };
     case "worker.prepareQuit":
       return { type: envelope.type, payload: envelope.payload };

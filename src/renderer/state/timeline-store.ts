@@ -15,6 +15,7 @@ export interface TimelineState {
   snapshot: AppSnapshot;
   selectedProjectId: string | null;
   selectedRoomId: string | null;
+  selectedTaskId: string | null;
   eventsByRoom: Readonly<Record<string, readonly RoomEvent[]>>;
   error: string | null;
 }
@@ -24,17 +25,19 @@ export interface TimelineStore {
   subscribe(listener: () => void): () => void;
   hydrate(): Promise<void>;
   selectRoom(roomId: string): Promise<void>;
+  selectTask(taskId: string | null): void;
   addProject(): Promise<void>;
   createRoom(projectId: string, title: string): Promise<void>;
   postMessage(roomId: string, body: string): Promise<void>;
   dispose(): void;
 }
 
-const EMPTY_SNAPSHOT: AppSnapshot = { projects: [], rooms: [], roomCursors: {} };
+const EMPTY_SNAPSHOT: AppSnapshot = { projects: [], rooms: [], tasks: [], roomCursors: {} };
 const POST_INTERRUPTED_MESSAGE = "Message delivery was interrupted. Try again.";
 const CREATE_ROOM_INTERRUPTED_MESSAGE = "Room creation was interrupted. Try again.";
 Object.freeze(EMPTY_SNAPSHOT.projects);
 Object.freeze(EMPTY_SNAPSHOT.rooms);
+Object.freeze(EMPTY_SNAPSHOT.tasks);
 Object.freeze(EMPTY_SNAPSHOT.roomCursors);
 Object.freeze(EMPTY_SNAPSHOT);
 
@@ -42,10 +45,12 @@ function immutableSnapshot(snapshot: AppSnapshot): AppSnapshot {
   const copy: AppSnapshot = {
     projects: snapshot.projects.map((project) => Object.freeze({ ...project })),
     rooms: snapshot.rooms.map((room) => Object.freeze({ ...room })),
+    tasks: snapshot.tasks.map((task) => Object.freeze({ ...task })),
     roomCursors: { ...snapshot.roomCursors }
   };
   Object.freeze(copy.projects);
   Object.freeze(copy.rooms);
+  Object.freeze(copy.tasks);
   Object.freeze(copy.roomCursors);
   return Object.freeze(copy);
 }
@@ -81,6 +86,7 @@ export function createTimelineStore(
     snapshot: EMPTY_SNAPSHOT,
     selectedProjectId: null,
     selectedRoomId: null,
+    selectedTaskId: null,
     eventsByRoom: Object.freeze({}),
     error: null
   });
@@ -156,8 +162,12 @@ export function createTimelineStore(
       ...(state.eventsByRoom[roomId] ?? []),
       ...events.map(immutableEvent)
     ]);
+    const createdTask = [...events].reverse().find((event) => event.type === "task.created");
     patchState({
-      eventsByRoom: Object.freeze({ ...state.eventsByRoom, [roomId]: roomEvents })
+      eventsByRoom: Object.freeze({ ...state.eventsByRoom, [roomId]: roomEvents }),
+      ...(createdTask?.type === "task.created"
+        ? { selectedTaskId: createdTask.payload.task.id }
+        : {})
     });
   }
 
@@ -283,7 +293,7 @@ export function createTimelineStore(
       }
       let parsedSnapshot = AppSnapshotSchema.safeParse(response.payload.data);
       if (!parsedSnapshot.success) {
-        const accumulated: AppSnapshot = { projects: [], rooms: [], roomCursors: {} };
+        const accumulated: AppSnapshot = { projects: [], rooms: [], tasks: [], roomCursors: {} };
         let expectedSnapshotId: string | null = null;
         let cursor = 0;
         while (true) {
@@ -304,6 +314,10 @@ export function createTimelineStore(
           for (const room of page.rooms) {
             if (accumulated.rooms.some((item) => item.id === room.id)) throw new Error("Snapshot contains a duplicate room");
             accumulated.rooms.push(room);
+          }
+          for (const task of page.tasks) {
+            if (accumulated.tasks.some((item) => item.task.id === task.task.id)) throw new Error("Snapshot contains a duplicate task");
+            accumulated.tasks.push(task);
           }
           for (const [roomId, roomSeq] of Object.entries(page.roomCursors)) {
             if (roomId in accumulated.roomCursors) throw new Error("Snapshot contains a duplicate room cursor");
@@ -331,7 +345,11 @@ export function createTimelineStore(
       const selectedRoomId = retainedRoom?.id ?? snapshot.rooms.find((candidate) => (
         candidate.projectId === selectedProjectId
       ))?.id ?? null;
-      patchCurrent(epoch, { snapshot, selectedProjectId, selectedRoomId });
+      const retainedTask = snapshot.tasks.find((candidate) => candidate.task.id === state.selectedTaskId);
+      const selectedTaskId = retainedTask?.task.id
+        ?? snapshot.tasks.find((candidate) => candidate.task.roomId === selectedRoomId)?.task.id
+        ?? null;
+      patchCurrent(epoch, { snapshot, selectedProjectId, selectedRoomId, selectedTaskId });
       if (selectedRoomId !== null) await catchUp(selectedRoomId, epoch);
       patchStatus(epoch, statusOperation, { connection: "ready", error: null });
       if (isCurrent(epoch)) hasHydrated = true;
@@ -398,7 +416,8 @@ export function createTimelineStore(
     if (!selectedRoom) throw new Error("Room is not present in the current snapshot");
     patchCurrent(operationEpoch, {
       selectedProjectId: selectedRoom.projectId,
-      selectedRoomId: selectedRoom.id
+      selectedRoomId: selectedRoom.id,
+      selectedTaskId: state.snapshot.tasks.find((candidate) => candidate.task.roomId === selectedRoom.id)?.task.id ?? null
     });
     try {
       await catchUp(selectedRoom.id, operationEpoch);
@@ -419,6 +438,12 @@ export function createTimelineStore(
     },
     hydrate,
     selectRoom,
+    selectTask(taskId) {
+      if (taskId !== null && !state.snapshot.tasks.some((candidate) => candidate.task.id === taskId)) {
+        throw new Error("Task is not present in the current snapshot");
+      }
+      patchState({ selectedTaskId: taskId });
+    },
     async addProject() {
       if (disposed) return;
       const operationEpoch = lifecycleEpoch;
@@ -465,7 +490,8 @@ export function createTimelineStore(
         }
         patchCurrent(operationEpoch, {
           selectedProjectId: addedProject.id,
-          selectedRoomId: null
+          selectedRoomId: null,
+          selectedTaskId: null
         });
       } catch (error) {
         patchStatus(operationEpoch, statusOperation, {

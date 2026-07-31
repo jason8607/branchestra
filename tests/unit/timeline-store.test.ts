@@ -40,6 +40,7 @@ function foundationSnapshot(latestRoomSeq = 0): AppSnapshot {
   return {
     projects: [project()],
     rooms: [room()],
+    tasks: [],
     roomCursors: { [ROOM_ID]: latestRoomSeq }
   };
 }
@@ -257,8 +258,8 @@ describe("timeline store", () => {
         commands.push(command);
         if (command.type === "room.replay") return successResponse(command, eventPage([], false));
         const page = commands.length === 1
-          ? { snapshotId, projects: [project()], rooms: [], roomCursors: {}, nextCursor: 1, hasMore: true }
-          : { snapshotId, projects: [], rooms: [room()], roomCursors: { [ROOM_ID]: 0 }, nextCursor: 3, hasMore: false };
+          ? { snapshotId, projects: [project()], rooms: [], tasks: [], roomCursors: {}, nextCursor: 1, hasMore: true }
+          : { snapshotId, projects: [], rooms: [room()], tasks: [], roomCursors: { [ROOM_ID]: 0 }, nextCursor: 3, hasMore: false };
         return successResponse(command, page);
       },
       subscribe: () => () => undefined
@@ -311,6 +312,7 @@ describe("timeline store", () => {
       snapshot: {
         projects: [project(), projectTwo],
         rooms: [room(), roomTwo, roomThree],
+        tasks: [],
         roomCursors: { [ROOM_ID]: 0, [roomTwo.id]: 0, [roomThree.id]: 0 }
       },
       replayPages: [eventPage([], false), { ...eventPage([], false), roomId: roomTwo.id }]
@@ -327,6 +329,7 @@ describe("timeline store", () => {
     fixture.setSnapshot({
       projects: [project(), projectTwo],
       rooms: [room(), roomTwo, roomThree],
+      tasks: [],
       roomCursors: { [ROOM_ID]: 0, [roomTwo.id]: 0, [roomThree.id]: 0 }
     });
     fixture.queueReplay({ ...eventPage([], false), roomId: roomTwo.id });
@@ -336,6 +339,7 @@ describe("timeline store", () => {
     fixture.setSnapshot({
       projects: [project(), projectTwo],
       rooms: [room(), roomThree],
+      tasks: [],
       roomCursors: { [ROOM_ID]: 0, [roomThree.id]: 0 }
     });
     fixture.queueReplay({ ...eventPage([], false), roomId: roomThree.id });
@@ -451,6 +455,7 @@ describe("timeline store", () => {
           : {
               projects: [project()],
               rooms: [room(), createdRoom],
+              tasks: [],
               roomCursors: { [ROOM_ID]: 0, [createdRoom.id]: 0 }
             });
       }
@@ -555,6 +560,7 @@ describe("timeline store", () => {
           : {
               projects: [project(), addedProject],
               rooms: [room()],
+              tasks: [],
               roomCursors: { [ROOM_ID]: 0 }
             });
       }
@@ -595,6 +601,7 @@ describe("timeline store", () => {
           : {
               projects: [project(), addedProject],
               rooms: [room(), addedRoom],
+              tasks: [],
               roomCursors: { [ROOM_ID]: 0, [addedRoom.id]: 0 }
             });
       }
@@ -926,6 +933,7 @@ describe("timeline store", () => {
         return successResponse(command, {
           projects: [project(), addedProject],
           rooms: [room()],
+          tasks: [],
           roomCursors: { [ROOM_ID]: 0 }
         });
       }
@@ -957,6 +965,7 @@ describe("timeline store", () => {
         return successResponse(command, {
           projects: [project()],
           rooms: [room(), roomTwo],
+          tasks: [],
           roomCursors: { [ROOM_ID]: 0, [roomTwo.id]: 0 }
         });
       }
@@ -1093,6 +1102,7 @@ describe("timeline store", () => {
         return successResponse(command, {
           projects: [project()],
           rooms: [room(), createdRoom],
+          tasks: [],
           roomCursors: { [ROOM_ID]: 0, [createdRoom.id]: 0 }
         });
       }
@@ -1168,6 +1178,7 @@ describe("timeline store", () => {
         return successResponse(command, {
           projects: [project()],
           rooms: [room(), roomTwo],
+          tasks: [],
           roomCursors: { [ROOM_ID]: 0, [roomTwo.id]: 0 }
         });
       }
@@ -1214,6 +1225,7 @@ describe("timeline store", () => {
         return successResponse(command, {
           projects: [project()],
           rooms: [room(), roomTwo],
+          tasks: [],
           roomCursors: { [ROOM_ID]: 0, [roomTwo.id]: 0 }
         });
       }
@@ -1298,6 +1310,7 @@ describe("timeline store", () => {
         return successResponse(command, {
           projects: [project()],
           rooms: [room(), roomTwo],
+          tasks: [],
           roomCursors: { [ROOM_ID]: 0, [roomTwo.id]: 0 }
         });
       }

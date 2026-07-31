@@ -44,7 +44,7 @@ function workerResponse(request: WorkerRequestEnvelope): WorkerResponseEnvelope 
   const data = (() => {
     switch (request.type) {
       case "state.getSnapshot":
-        return { projects: [], rooms: [], roomCursors: {} };
+        return { projects: [], rooms: [], tasks: [], roomCursors: {} };
       case "room.replay":
         return {
           roomId: request.payload.roomId,

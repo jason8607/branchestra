@@ -476,4 +476,20 @@ export class TaskService {
       }
     );
   }
+
+  requestRevision(input: {
+    taskId: string;
+    instruction: string;
+    idempotencyKey: string;
+  }): TaskRecord {
+    if (input.instruction.trim().length === 0) throw new Error("REVISION_INSTRUCTION_REQUIRED");
+    const task = this.dependencies.repositories.tasks.getRequired(input.taskId);
+    return this.dependencies.repositories.tasks.applyTransition(
+      transitionTask(
+        { ...task, updatedAt: this.dependencies.now() },
+        { type: "requestHumanRevision", instruction: input.instruction }
+      ),
+      this.dependencies.id()
+    );
+  }
 }

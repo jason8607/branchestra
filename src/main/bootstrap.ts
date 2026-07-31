@@ -24,12 +24,14 @@ export interface BootstrapPaths {
 export interface E2EEnvironment {
   userDataPath: string;
   projectPath: string;
+  mockScenario?: "two-round-success" | "interrupted-run";
 }
 
 const e2eEnvironmentNames = [
   "BRANCHESTRA_E2E",
   "BRANCHESTRA_E2E_USER_DATA",
-  "BRANCHESTRA_E2E_PROJECT_PATH"
+  "BRANCHESTRA_E2E_PROJECT_PATH",
+  "BRANCHESTRA_E2E_MOCK_SCENARIO"
 ] as const;
 
 export function resolveE2EEnvironment(
@@ -46,7 +48,15 @@ export function resolveE2EEnvironment(
   ) {
     throw new Error("E2E requires nonempty user-data and project paths");
   }
-  return { userDataPath, projectPath };
+  const scenario = environment.BRANCHESTRA_E2E_MOCK_SCENARIO;
+  if (scenario !== undefined && scenario !== "two-round-success" && scenario !== "interrupted-run") {
+    throw new Error("E2E mock scenario is invalid");
+  }
+  return {
+    userDataPath,
+    projectPath,
+    ...(scenario ? { mockScenario: scenario } : {})
+  };
 }
 
 export function resolveBootstrapPaths(mainModuleUrl: string, userDataPath: string): BootstrapPaths {
@@ -66,6 +76,9 @@ export function bootstrapMain(): void {
   if (e2eEnvironment === null) {
     projectDialog = createElectronProjectDialog();
   } else {
+    if (app.isPackaged && e2eEnvironment.mockScenario !== undefined) {
+      throw new Error("MOCK_PROVIDER_DISABLED");
+    }
     app.setPath("userData", e2eEnvironment.userDataPath);
     projectDialog = createFixedProjectDialog(e2eEnvironment.projectPath);
   }
@@ -80,7 +93,10 @@ export function bootstrapMain(): void {
     schedule(delayMs, callback) {
       const timeout = setTimeout(callback, delayMs);
       return () => clearTimeout(timeout);
-    }
+    },
+    ...(e2eEnvironment?.mockScenario
+      ? { e2eMockScenario: e2eEnvironment.mockScenario }
+      : {})
   });
   let window: BrowserWindow | null = null;
 

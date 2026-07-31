@@ -64,6 +64,16 @@ export interface IntegrateCheckpointInput {
   idempotencyKey: string;
 }
 
+export interface ProtectCandidateInput {
+  projectId: string;
+  taskId: string;
+  candidateId: string;
+  leadWorktree: WorktreeRecord;
+  expectedHeadOid: string;
+  workerGeneration: string;
+  idempotencyKey: string;
+}
+
 export type IntegrationFailureDisposition =
   | "safe_to_fail_service_command"
   | "reconciliation_required";
@@ -1025,6 +1035,296 @@ export class GitManager {
       }
       this.options.artifacts.updateCheckpoint(storedLead.id, result.headOid);
       return result;
+    });
+  }
+
+  async protectCandidate(input: ProtectCandidateInput): Promise<{
+    candidateOid: string;
+    immutableRef: string;
+  }> {
+    assertSafeId(input.projectId, "PROJECT_ID_INVALID");
+    assertSafeId(input.taskId, "TASK_ID_INVALID");
+    assertSafeId(input.candidateId, "CANDIDATE_ID_INVALID");
+    assertGitOid(input.expectedHeadOid);
+    const task = this.options.tasks.getRequired(input.taskId);
+    if (task.projectId !== input.projectId) throw new Error("TASK_PROJECT_MISMATCH");
+    const project = this.options.projects.findById(input.projectId);
+    if (!project) throw new Error(`PROJECT_NOT_FOUND:${input.projectId}`);
+    const storedLead = this.options.artifacts.getWorktree(input.taskId, "lead");
+    if (!storedLead
+      || input.leadWorktree.role !== "lead"
+      || !sameWorktreeIdentity(storedLead, input.leadWorktree)) {
+      throw new Error("LEAD_WORKTREE_RECORD_MISMATCH");
+    }
+    const [repositoryRoot, commonDir, worktreePath] = await Promise.all([
+      realpath(project.repositoryRoot),
+      realpath(project.gitCommonDir),
+      realpath(storedLead.pathRealpath)
+    ]);
+    const identity = await this.readService.inspectRepository(worktreePath, worktreePath);
+    if (identity.commonDirRealpath !== commonDir) throw new Error("REPOSITORY_IDENTITY_MISMATCH");
+    const immutableRef = `refs/branchestra/candidates/${input.candidateId}`;
+
+    return this.options.lock.withLock(commonDir, async () => {
+      const headOid = await this.resolveHead(worktreePath);
+      if (headOid !== input.expectedHeadOid) throw new Error("CANDIDATE_HEAD_CHANGED");
+      const existing = await this.resolveRef(repositoryRoot, immutableRef);
+      if (existing !== null && existing !== input.expectedHeadOid) {
+        throw new Error("IMMUTABLE_CANDIDATE_REF_CONFLICT");
+      }
+      let executionError: string | null = null;
+      const createdAt = this.options.now();
+      const intent: OperationIntentRecord<{
+        leadWorktreeId: string;
+        immutableRef: string;
+        candidateOid: string;
+      }> = {
+        id: this.options.id(),
+        projectId: input.projectId,
+        taskId: input.taskId,
+        repositoryCommonDirRealpath: commonDir,
+        operationType: "candidate.ref.create",
+        idempotencyKey: input.idempotencyKey,
+        expected: {
+          leadWorktreeId: storedLead.id,
+          immutableRef,
+          candidateOid: input.expectedHeadOid
+        },
+        status: "intent",
+        observation: null,
+        workerGeneration: input.workerGeneration,
+        createdAt,
+        updatedAt: createdAt
+      };
+      try {
+        return await this.options.operations.run({
+          intent,
+          execute: async () => {
+            if (existing === input.expectedHeadOid) return;
+            try {
+              await this.options.git.run(repositoryRoot, [
+                "update-ref",
+                immutableRef,
+                input.expectedHeadOid,
+                "0".repeat(input.expectedHeadOid.length)
+              ]);
+            } catch (error) {
+              executionError = errorMessage(error);
+            }
+          },
+          observe: async () => {
+            const refOid = await this.resolveRef(repositoryRoot, immutableRef);
+            const actual = { refOid, executionError };
+            return refOid === input.expectedHeadOid
+              ? {
+                  outcome: "applied" as const,
+                  actual,
+                  result: { candidateOid: input.expectedHeadOid, immutableRef }
+                }
+              : refOid === null
+                ? { outcome: "not_applied" as const, actual }
+                : { outcome: "conflict" as const, actual };
+          }
+        });
+      } catch (error) {
+        throw new Error("IMMUTABLE_CANDIDATE_REF_CONFLICT", { cause: error });
+      }
+    });
+  }
+
+  async verifyCandidateRef(repositoryRootRealpath: string, immutableRef: string, expectedOid: string): Promise<void> {
+    assertGitOid(expectedOid);
+    const root = await realpath(repositoryRootRealpath);
+    if (await this.resolveRef(root, immutableRef) !== expectedOid) {
+      throw new Error("IMMUTABLE_CANDIDATE_REF_CONFLICT");
+    }
+  }
+
+  async fastForwardCheckedOutOwner(input: {
+    projectId: string;
+    taskId: string;
+    ownerWorktreeRealpath: string;
+    targetRef: string;
+    baseOid: string;
+    candidateOid: string;
+    commonDirRealpath: string;
+    workerGeneration: string;
+    idempotencyKey: string;
+    assertApproved?(): Promise<void>;
+  }): Promise<{ mode: "checked_out_ff_only"; targetOid: string }> {
+    assertGitOid(input.baseOid);
+    assertGitOid(input.candidateOid);
+    const task = this.options.tasks.getRequired(input.taskId);
+    if (task.projectId !== input.projectId) throw new Error("TASK_PROJECT_MISMATCH");
+    const project = this.options.projects.findById(input.projectId);
+    if (!project) throw new Error(`PROJECT_NOT_FOUND:${input.projectId}`);
+    const [repositoryRoot, commonDir, owner] = await Promise.all([
+      realpath(project.repositoryRoot),
+      realpath(project.gitCommonDir),
+      realpath(input.ownerWorktreeRealpath)
+    ]);
+    if (commonDir !== input.commonDirRealpath) throw new Error("REPOSITORY_IDENTITY_MISMATCH");
+    return this.options.lock.withLock(commonDir, async () => {
+      await input.assertApproved?.();
+      const owners = (await this.readService.listWorktrees(repositoryRoot))
+        .filter((worktree) => worktree.branchRef === input.targetRef);
+      if (owners.length !== 1 || owners[0]?.pathRealpath !== owner) {
+        throw new Error("TARGET_WORKTREE_OWNER_CHANGED");
+      }
+      const status = await this.readService.status({
+        repositoryRootRealpath: repositoryRoot,
+        worktreePathRealpath: owner
+      });
+      if (!status.clean) throw new Error("TARGET_WORKTREE_DIRTY");
+      if (status.inProgressOperation !== null) throw new Error("TARGET_WORKTREE_OPERATION_IN_PROGRESS");
+      if (await this.resolveRef(repositoryRoot, input.targetRef) !== input.baseOid) {
+        throw new Error("TARGET_REF_CHANGED");
+      }
+      let executionError: string | null = null;
+      const createdAt = this.options.now();
+      const intent: OperationIntentRecord<{
+        ownerWorktreeRealpath: string;
+        targetRef: string;
+        baseOid: string;
+        candidateOid: string;
+      }> = {
+        id: this.options.id(),
+        projectId: input.projectId,
+        taskId: input.taskId,
+        repositoryCommonDirRealpath: commonDir,
+        operationType: "merge.ff_only",
+        idempotencyKey: input.idempotencyKey,
+        expected: { ownerWorktreeRealpath: owner, targetRef: input.targetRef, baseOid: input.baseOid, candidateOid: input.candidateOid },
+        status: "intent",
+        observation: null,
+        workerGeneration: input.workerGeneration,
+        createdAt,
+        updatedAt: createdAt
+      };
+      try {
+        return await this.options.operations.run({
+          intent,
+          execute: async () => {
+            try {
+              await input.assertApproved?.();
+              const freshStatus = await this.readService.status({
+                repositoryRootRealpath: repositoryRoot,
+                worktreePathRealpath: owner
+              });
+              if (!freshStatus.clean || freshStatus.inProgressOperation !== null) {
+                executionError = "TARGET_WORKTREE_DIRTY";
+                return;
+              }
+              if (await this.resolveRef(repositoryRoot, input.targetRef) !== input.baseOid) {
+                executionError = "TARGET_REF_CHANGED";
+                return;
+              }
+              await this.options.git.run(owner, ["merge", "--ff-only", input.candidateOid]);
+            } catch (error) {
+              executionError = errorMessage(error);
+            }
+          },
+          observe: async () => {
+            const [targetOid, headOid, finalStatus] = await Promise.all([
+              this.resolveRef(repositoryRoot, input.targetRef),
+              this.resolveHead(owner),
+              this.readService.status({ repositoryRootRealpath: repositoryRoot, worktreePathRealpath: owner })
+            ]);
+            const actual = { targetOid, headOid, clean: finalStatus.clean, inProgressOperation: finalStatus.inProgressOperation, executionError };
+            return targetOid === input.candidateOid && headOid === input.candidateOid
+              && finalStatus.clean && finalStatus.inProgressOperation === null
+              ? { outcome: "applied" as const, actual, result: { mode: "checked_out_ff_only" as const, targetOid: input.candidateOid } }
+              : targetOid === input.baseOid && headOid === input.baseOid
+                ? { outcome: "not_applied" as const, actual }
+                : { outcome: "conflict" as const, actual };
+          }
+        });
+      } catch (error) {
+        throw new Error("TARGET_FF_ONLY_FAILED", { cause: error });
+      }
+    });
+  }
+
+  async compareAndSwapUnownedRef(input: {
+    projectId: string;
+    taskId: string;
+    repositoryRootRealpath: string;
+    targetRef: string;
+    baseOid: string;
+    candidateOid: string;
+    commonDirRealpath: string;
+    workerGeneration: string;
+    idempotencyKey: string;
+    assertApproved?(): Promise<void>;
+  }): Promise<{ mode: "unowned_update_ref_cas"; targetOid: string }> {
+    assertGitOid(input.baseOid);
+    assertGitOid(input.candidateOid);
+    const task = this.options.tasks.getRequired(input.taskId);
+    if (task.projectId !== input.projectId) throw new Error("TASK_PROJECT_MISMATCH");
+    const project = this.options.projects.findById(input.projectId);
+    if (!project) throw new Error(`PROJECT_NOT_FOUND:${input.projectId}`);
+    const [repositoryRoot, suppliedRoot, commonDir] = await Promise.all([
+      realpath(project.repositoryRoot),
+      realpath(input.repositoryRootRealpath),
+      realpath(project.gitCommonDir)
+    ]);
+    if (repositoryRoot !== suppliedRoot || commonDir !== input.commonDirRealpath) {
+      throw new Error("REPOSITORY_IDENTITY_MISMATCH");
+    }
+    return this.options.lock.withLock(commonDir, async () => {
+      await input.assertApproved?.();
+      if ((await this.readService.listWorktrees(repositoryRoot)).some(({ branchRef }) => branchRef === input.targetRef)) {
+        throw new Error("TARGET_REF_HAS_CHECKOUT_OWNER");
+      }
+      if (await this.resolveRef(repositoryRoot, input.targetRef) !== input.baseOid) {
+        throw new Error("TARGET_REF_CAS_FAILED");
+      }
+      let executionError: string | null = null;
+      const createdAt = this.options.now();
+      const intent: OperationIntentRecord<{
+        targetRef: string;
+        baseOid: string;
+        candidateOid: string;
+      }> = {
+        id: this.options.id(),
+        projectId: input.projectId,
+        taskId: input.taskId,
+        repositoryCommonDirRealpath: commonDir,
+        operationType: "merge.update_ref_cas",
+        idempotencyKey: input.idempotencyKey,
+        expected: { targetRef: input.targetRef, baseOid: input.baseOid, candidateOid: input.candidateOid },
+        status: "intent",
+        observation: null,
+        workerGeneration: input.workerGeneration,
+        createdAt,
+        updatedAt: createdAt
+      };
+      try {
+        return await this.options.operations.run({
+          intent,
+          execute: async () => {
+            try {
+              await input.assertApproved?.();
+              await this.options.git.run(repositoryRoot, [
+                "update-ref", input.targetRef, input.candidateOid, input.baseOid
+              ]);
+            } catch (error) {
+              executionError = errorMessage(error);
+            }
+          },
+          observe: async () => {
+            const targetOid = await this.resolveRef(repositoryRoot, input.targetRef);
+            const actual = { targetOid, executionError };
+            return targetOid === input.candidateOid
+              ? { outcome: "applied" as const, actual, result: { mode: "unowned_update_ref_cas" as const, targetOid: input.candidateOid } }
+              : targetOid === input.baseOid
+                ? { outcome: "not_applied" as const, actual }
+                : { outcome: "conflict" as const, actual };
+          }
+        });
+      } catch (error) {
+        throw new Error("TARGET_REF_CAS_FAILED", { cause: error });
+      }
     });
   }
 

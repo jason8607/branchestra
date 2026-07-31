@@ -15,12 +15,13 @@ export interface CommandHandlerServices {
     "createFromUserMessage" | "decideScope" | "grantAdditionalRounds"
     | "decideScopeResult" | "grantAdditionalRoundsResult">;
   taskExecutionServices?: TaskExecutionServices;
+  taskCommandHandlers?: readonly AnyCommandHandler[];
   prepareQuit(deadlineMs: number): Promise<void>;
 }
 
-type CanonicalHandlers = {
+type CanonicalHandlers = Partial<{
   [TType in WorkerCommand["type"]]: CommandHandler<TType>;
-};
+}>;
 
 export function createCommandHandlers(
   services: CommandHandlerServices
@@ -28,6 +29,7 @@ export function createCommandHandlers(
   type SnapshotEntry =
     | { kind: "project"; value: AppSnapshot["projects"][number] }
     | { kind: "room"; value: AppSnapshot["rooms"][number] }
+    | { kind: "task"; value: AppSnapshot["tasks"][number] }
     | { kind: "cursor"; roomId: string; roomSeq: number };
   const snapshotSessions = new Map<string, {
     entries: readonly SnapshotEntry[];
@@ -35,19 +37,21 @@ export function createCommandHandlers(
   }>();
   const pageSnapshot = (snapshotId: string, entries: readonly SnapshotEntry[], cursor: number): SnapshotPage => {
     if (cursor < 0 || cursor > entries.length) throw new Error("Snapshot cursor is invalid");
-    const page = { snapshotId, projects: [], rooms: [], roomCursors: {}, nextCursor: cursor, hasMore: false } as SnapshotPage;
+    const page = { snapshotId, projects: [], rooms: [], tasks: [], roomCursors: {}, nextCursor: cursor, hasMore: false } as SnapshotPage;
     for (let index = cursor; index < entries.length; index += 1) {
       const entry = entries[index]!;
       const candidate: SnapshotPage = {
         ...page,
         projects: [...page.projects],
         rooms: [...page.rooms],
+        tasks: [...page.tasks],
         roomCursors: { ...page.roomCursors },
         nextCursor: index + 1,
         hasMore: index + 1 < entries.length
       };
       if (entry.kind === "project") candidate.projects.push(entry.value);
       else if (entry.kind === "room") candidate.rooms.push(entry.value);
+      else if (entry.kind === "task") candidate.tasks.push(entry.value);
       else candidate.roomCursors[entry.roomId] = entry.roomSeq;
       if (encodedEnvelopeBytes(candidate) > MAX_IPC_BYTES - 2_048) break;
       Object.assign(page, candidate);
@@ -72,6 +76,7 @@ export function createCommandHandlers(
     const entries: SnapshotEntry[] = [
       ...snapshot.projects.map((value) => ({ kind: "project" as const, value })),
       ...snapshot.rooms.map((value) => ({ kind: "room" as const, value })),
+      ...snapshot.tasks.map((value) => ({ kind: "task" as const, value })),
       ...Object.entries(snapshot.roomCursors).map(([roomId, roomSeq]) => ({ kind: "cursor" as const, roomId, roomSeq }))
     ];
     const snapshotId = randomUUID();
@@ -174,14 +179,17 @@ export function createCommandHandlers(
     }
   };
 
+  const legacyTaskHandlers = [
+    handlers["task.approveScope"]!,
+    handlers["task.grantAdditionalRound"]!
+  ];
   return [
-    handlers["state.getSnapshot"],
-    handlers["room.replay"],
-    handlers["project.addExisting"],
-    handlers["room.create"],
-    handlers["message.post"],
-    handlers["task.approveScope"],
-    handlers["task.grantAdditionalRound"],
-    handlers["worker.prepareQuit"]
+    handlers["state.getSnapshot"]!,
+    handlers["room.replay"]!,
+    handlers["project.addExisting"]!,
+    handlers["room.create"]!,
+    handlers["message.post"]!,
+    ...(services.taskCommandHandlers ?? legacyTaskHandlers),
+    handlers["worker.prepareQuit"]!
   ];
 }

@@ -55,7 +55,7 @@ describe("worker router", () => {
       roomService: {
         createRoom: () => ({ value: room, replayed: false }),
         postUserMessage: () => ({ value: event, replayed: false }),
-        getSnapshot: () => ({ projects: [], rooms: [], roomCursors: {} }),
+        getSnapshot: () => ({ projects: [], rooms: [], tasks: [], roomCursors: {} }),
         replayRoom: () => ({ roomId: room.id, events: [], nextRoomSeq: 0, hasMore: false })
       },
       taskService: {
@@ -85,11 +85,11 @@ describe("worker router", () => {
   it("rejects duplicate handler registrations during construction", () => {
     const first: CommandHandler<"state.getSnapshot"> = {
       type: "state.getSnapshot",
-      handle: () => ({ data: { projects: [], rooms: [], roomCursors: {} }, replayed: false })
+      handle: () => ({ data: { projects: [], rooms: [], tasks: [], roomCursors: {} }, replayed: false })
     };
     const second: CommandHandler<"state.getSnapshot"> = {
       type: "state.getSnapshot",
-      handle: () => ({ data: { projects: [], rooms: [], roomCursors: {} }, replayed: false })
+      handle: () => ({ data: { projects: [], rooms: [], tasks: [], roomCursors: {} }, replayed: false })
     };
 
     expect(() => createWorkerRouter({
@@ -99,7 +99,7 @@ describe("worker router", () => {
   });
 
   it("rejects a stale generation before invoking a handler", async () => {
-    const handle = vi.fn(() => ({ data: { projects: [], rooms: [], roomCursors: {} }, replayed: false }));
+    const handle = vi.fn(() => ({ data: { projects: [], rooms: [], tasks: [], roomCursors: {} }, replayed: false }));
     const handler: CommandHandler<"state.getSnapshot"> = { type: "state.getSnapshot", handle };
     const route = createWorkerRouter({ workerGeneration: activeGeneration, handlers: [handler] });
     const response = await route({ ...request, workerGeneration: "50000000-0000-4000-8000-000000000002" });
@@ -110,7 +110,7 @@ describe("worker router", () => {
   it("dispatches the exact command and echoes request correlation", async () => {
     const handler: CommandHandler<"state.getSnapshot"> = {
       type: "state.getSnapshot",
-      handle: vi.fn(() => ({ data: { projects: [], rooms: [], roomCursors: {} }, replayed: false }))
+      handle: vi.fn(() => ({ data: { projects: [], rooms: [], tasks: [], roomCursors: {} }, replayed: false }))
     };
     const route = createWorkerRouter({ workerGeneration: activeGeneration, handlers: [handler] });
     const response = await route(request);
@@ -131,7 +131,7 @@ describe("worker router", () => {
       roomService: {
         createRoom: () => ({ value: rooms[0]!, replayed: false }),
         postUserMessage: vi.fn(),
-        getSnapshot: () => ({ projects: [project], rooms, roomCursors: Object.fromEntries(rooms.map((room) => [room.id, 0])) }),
+        getSnapshot: () => ({ projects: [project], rooms, tasks: [], roomCursors: Object.fromEntries(rooms.map((room) => [room.id, 0])) }),
         replayRoom: vi.fn()
       },
       taskService: {

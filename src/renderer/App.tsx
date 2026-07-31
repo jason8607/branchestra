@@ -3,10 +3,12 @@ import { Composer } from "./components/Composer";
 import { Inspector } from "./components/Inspector";
 import { ProjectRail } from "./components/ProjectRail";
 import { Timeline } from "./components/Timeline";
+import { useTaskInspector } from "./features/tasks/use-task-inspector";
 import type { TimelineStore } from "./state/timeline-store";
 
 export function App({ store }: { store: TimelineStore }): React.JSX.Element {
   const state = useSyncExternalStore(store.subscribe, store.getState, store.getState);
+  const taskInspector = useTaskInspector(window.branchestra, state.selectedTaskId);
 
   useEffect(() => {
     void store.hydrate();
@@ -31,13 +33,21 @@ export function App({ store }: { store: TimelineStore }): React.JSX.Element {
           <h1>Shared Timeline</h1>
           {state.error ? <p className="connection-error" role="alert">{state.error}</p> : null}
         </header>
-        <Timeline events={events} />
+        <Timeline events={events} onSelectTask={(taskId) => store.selectTask(taskId)} />
         <Composer
           disabled={!room || state.connection !== "ready"}
           onSend={(body) => room ? store.postMessage(room.id, body) : Promise.resolve()}
         />
       </section>
-      <Inspector project={project} room={room} connection={state.connection} />
+      <Inspector
+        project={project}
+        room={room}
+        connection={state.connection}
+        taskModel={taskInspector.model}
+        taskPending={taskInspector.pending}
+        taskError={taskInspector.error}
+        requestTask={taskInspector.request}
+      />
     </main>
   );
 }

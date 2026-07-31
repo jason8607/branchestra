@@ -8,9 +8,10 @@ let the selected coding agent read the room context, work in the project, and
 stream its progress back into the conversation.
 
 > [!IMPORTANT]
-> Branchestra is in early development. The persistent desktop chat foundation
-> is implemented, but real Claude Code and Codex execution is not connected on
-> `main` yet. It is not ready for daily use or public installation.
+> Branchestra is in early development. The persistent desktop foundation and
+> guarded Git task engine are implemented, but real Claude Code and Codex
+> adapters are not connected on `main` yet. It is not ready for daily use or
+> public installation.
 
 ## Why Branchestra?
 
@@ -37,20 +38,23 @@ Implemented on `main`:
 - persistent projects, rooms, and messages backed by SQLite;
 - a unified timeline with restart-safe replay;
 - isolated renderer, typed preload API, and supervised utility worker;
-- unit, integration, and Electron end-to-end tests for the foundation.
+- approval-first `@Claude` / `@Codex` task creation;
+- isolated agent worktrees, immutable checkpoints and two review rounds;
+- verified candidates with bound diff/test hashes and exact final approval;
+- ff-only/CAS merge protection plus explicit crash-recovery previews;
+- a trusted Task Inspector for scope, merge, cancellation, and recovery actions;
+- unit, integration, and mock-provider Electron end-to-end coverage.
 
 Next MVP slice:
 
 - detect authenticated local `claude` and `codex` executables;
-- route `@Claude` and `@Codex` mentions;
 - provide the current room transcript as shared context;
 - stream structured CLI output into the timeline;
-- allow one agent at a time to modify the selected project and run tests;
-- cancel a running task and report its final Git change summary.
+- implement health-gated real Provider adapters without moving Git authority
+  outside the worker task engine.
 
-The longer-term design includes isolated worktrees, checkpoints, cross-review,
-approval-bound merges, crash recovery, signed macOS builds, and Homebrew Cask
-installation. These are not part of the first usable MVP.
+The longer-term design includes signed macOS builds and Homebrew Cask
+installation.
 
 ## Development
 
@@ -112,6 +116,7 @@ Anthropic and OpenAI and may change independently of Branchestra.
 - [Product design](docs/superpowers/specs/2026-07-21-branchestra-design.md)
 - [Implementation roadmap](docs/superpowers/plans/2026-07-21-branchestra-roadmap.md)
 - [Desktop foundation plan](docs/superpowers/plans/2026-07-21-branchestra-foundation.md)
+- [Git task engine plan](docs/superpowers/plans/2026-07-21-branchestra-git-task-engine.md)
 
 ## Contributing
 

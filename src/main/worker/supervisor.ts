@@ -34,6 +34,7 @@ export interface WorkerSupervisorDependencies {
   restartBackoffMs: readonly number[];
   schedule(delayMs: number, callback: () => void): () => void;
   environment?: Record<string, string | undefined>;
+  e2eMockScenario?: "two-round-success" | "interrupted-run";
 }
 
 export function createWorkerSupervisor(dependencies: WorkerSupervisorDependencies): WorkerSupervisor {
@@ -139,6 +140,9 @@ export function createWorkerSupervisor(dependencies: WorkerSupervisorDependencie
       BRANCHESTRA_WORKER_GENERATION: expectedGeneration,
       BRANCHESTRA_WORKER_START_IDENTITY: randomUUID()
     };
+    if (dependencies.e2eMockScenario) {
+      env.BRANCHESTRA_E2E_MOCK_SCENARIO = dependencies.e2eMockScenario;
+    }
     for (const name of ["LANG", "LC_ALL", "TMPDIR"] as const) {
       const value = environment[name];
       if (value !== undefined) env[name] = value;
