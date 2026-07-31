@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { app, BrowserWindow, ipcMain } from "electron";
+import { app, BrowserWindow, dialog as electronDialog, ipcMain, shell } from "electron";
 import {
   createElectronProjectDialog,
   createFixedProjectDialog,
@@ -12,7 +12,9 @@ import { installApplicationLifecycle } from "./lifecycle";
 import { resolveRendererLocation } from "./renderer-location";
 import { createWindowOptions } from "./window-options";
 import { createWorkerSupervisor } from "./worker/supervisor";
+import { installNavigationPolicy } from "./security/navigation-policy";
 import { electronUtilityProcessAdapter } from "./worker/utility-process-adapter";
+import { installE2EControls } from "./testing/e2e-controls";
 
 export interface BootstrapPaths {
   workerEntry: string;
@@ -98,6 +100,7 @@ export function bootstrapMain(): void {
       ? { e2eMockScenario: e2eEnvironment.mockScenario }
       : {})
   });
+  installE2EControls({ BRANCHESTRA_E2E: e2eEnvironment ? "1" : undefined }, supervisor);
   let window: BrowserWindow | null = null;
 
   const createWindow = async (): Promise<BrowserWindow> => {
@@ -114,7 +117,20 @@ export function bootstrapMain(): void {
       trustedRendererUrl: rendererLocation.url,
       parentWindow: created,
       dialog: projectDialog,
-      supervisor
+      supervisor,
+      async confirmExternal(canonicalUrl) {
+        const { response } = await electronDialog.showMessageBox(created, {
+          type: "question",
+          buttons: ["Open link", "Cancel"],
+          defaultId: 1,
+          cancelId: 1,
+          noLink: true,
+          message: "Open this link in your default browser?",
+          detail: canonicalUrl,
+        });
+        return response === 0;
+      },
+      openExternal: (canonicalUrl) => shell.openExternal(canonicalUrl),
     });
     let gatewayDisposed = false;
     const disposeWindowGateway = (): void => {
@@ -122,8 +138,7 @@ export function bootstrapMain(): void {
       gatewayDisposed = true;
       disposeGateway();
     };
-    created.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
-    created.webContents.on("will-navigate", (event) => event.preventDefault());
+    installNavigationPolicy(created);
     created.once("ready-to-show", () => created.show());
     created.once("closed", () => {
       disposeWindowGateway();

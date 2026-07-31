@@ -11,6 +11,8 @@ import {
 } from "../../shared/contracts/protocol";
 import type { ProjectDialogAdapter } from "../dialog/project-dialog";
 import type { WorkerSupervisor } from "../worker/supervisor";
+import { validateSender } from "./validated-sender";
+import { openVerifiedExternal } from "../security/navigation-policy";
 
 interface IpcMainAdapter {
   handle(
@@ -30,20 +32,17 @@ export interface RendererGatewayDependencies {
   parentWindow: BrowserWindow;
   dialog: ProjectDialogAdapter;
   supervisor: Pick<WorkerSupervisor, "request" | "subscribe" | "getGeneration">;
+  confirmExternal?: (url: string, userGestureNonce: string) => Promise<boolean>;
+  openExternal?: (url: string) => Promise<void>;
 }
 
 export function registerRendererGateway(dependencies: RendererGatewayDependencies): () => void {
   dependencies.ipcMain.handle("branchestra:request", async (event, raw) => {
-    if (event.sender.id !== dependencies.trustedWebContents.id) {
-      throw new Error("Untrusted renderer sender");
-    }
-    if (
-      event.senderFrame === null
-      || event.senderFrame.parent !== null
-      || event.senderFrame.url !== dependencies.trustedRendererUrl
-    ) {
+    if (event.sender.id !== dependencies.trustedWebContents.id) throw new Error("Untrusted renderer sender");
+    if (!event.senderFrame || event.senderFrame.parent !== null || event.senderFrame.url !== dependencies.trustedRendererUrl) {
       throw new Error("Untrusted renderer frame");
     }
+    validateSender(event as never, dependencies.trustedWebContents.id, dependencies.trustedRendererUrl);
 
     assertEnvelopeSize(raw);
     const request = parseEnvelope(RendererRequestEnvelopeSchema, raw);
@@ -53,6 +52,19 @@ export function registerRendererGateway(dependencies: RendererGatewayDependencie
       && request.workerGeneration === ZERO_WORKER_GENERATION;
     if (!isBootstrapSnapshot && request.workerGeneration !== activeGeneration) {
       throw new Error("Stale worker generation");
+    }
+
+    if (request.type === "external.open") {
+      if (!dependencies.confirmExternal || !dependencies.openExternal) throw new Error("External link opening is unavailable");
+      await openVerifiedExternal(request.payload.url, request.payload.userGestureNonce, dependencies.confirmExternal, dependencies.openExternal);
+      return WorkerResponseEnvelopeSchema.parse({
+        v: request.v,
+        requestId: request.requestId,
+        idempotencyKey: request.idempotencyKey,
+        workerGeneration: activeGeneration,
+        type: "response",
+        payload: { ok: true, requestType: request.type, data: { opened: true }, replayed: false },
+      });
     }
 
     let workerRequest: WorkerRequestEnvelope;
@@ -88,6 +100,26 @@ export function registerRendererGateway(dependencies: RendererGatewayDependencie
         });
         break;
       }
+      case "provider.pickExecutable": {
+        if (!dependencies.dialog.pickProviderExecutable) throw new Error("Provider executable picker is unavailable");
+        const selectedPath = await dependencies.dialog.pickProviderExecutable(dependencies.parentWindow, request.payload.provider);
+        const generationAfterDialog = dependencies.supervisor.getGeneration();
+        if (generationAfterDialog === null || generationAfterDialog !== activeGeneration) {
+          throw new Error("Worker generation changed while provider dialog was open");
+        }
+        if (selectedPath === null) {
+          return WorkerResponseEnvelopeSchema.parse({
+            v: request.v, requestId: request.requestId, idempotencyKey: request.idempotencyKey,
+            workerGeneration: activeGeneration, type: "response",
+            payload: { ok: true, requestType: request.type, data: { cancelled: true }, replayed: false },
+          });
+        }
+        workerRequest = WorkerRequestEnvelopeSchema.parse({
+          ...request, workerGeneration: activeGeneration, type: "provider.executableSelected",
+          payload: { provider: request.payload.provider, selectedPath },
+        });
+        break;
+      }
       case "state.getSnapshot":
       case "room.replay":
       case "room.create":
@@ -100,6 +132,7 @@ export function registerRendererGateway(dependencies: RendererGatewayDependencie
       case "task.approveFinalMerge":
       case "task.recovery.preview":
       case "task.recovery.resolve":
+      case "provider.health.list":
         workerRequest = WorkerRequestEnvelopeSchema.parse({
           ...request,
           workerGeneration: activeGeneration
@@ -119,12 +152,12 @@ export function registerRendererGateway(dependencies: RendererGatewayDependencie
     ) {
       throw new Error("Worker response correlation mismatch");
     }
-    if (request.type !== "project.pickExisting") return workerResponse;
+    if (request.type !== "project.pickExisting" && request.type !== "provider.pickExecutable") return workerResponse;
     const rewritten = WorkerResponseEnvelopeSchema.parse({
       ...workerResponse,
       payload: {
         ...workerResponse.payload,
-        requestType: "project.pickExisting"
+        requestType: request.type
       }
     });
     assertEnvelopeSize(rewritten);

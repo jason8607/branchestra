@@ -5,6 +5,7 @@ import { OperationJournal } from "../operations/operation-journal";
 import { TaskRepository } from "../tasks/task-repository";
 import type { Database } from "./database";
 import { createEventStore } from "./event-store";
+import { ProviderRepository } from "./provider-repository";
 
 export interface ProjectRepository {
   insert(project: Project): Project;
@@ -28,6 +29,7 @@ export interface DomainRepositories extends EventStoreRepositories {
   tasks: TaskRepository;
   approvals: ApprovalRepository;
   operations: OperationJournal;
+  providers: ProviderRepository;
 }
 
 interface ProjectRow {
@@ -107,5 +109,6 @@ export function createRepositories(database: Database): DomainRepositories {
   repositories.tasks = new TaskRepository(database, canonicalEventStore);
   repositories.approvals = new ApprovalRepository(database);
   repositories.operations = new OperationJournal(database);
+  repositories.providers = new ProviderRepository(database);
   return repositories;
 }

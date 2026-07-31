@@ -7,6 +7,8 @@ import type { TaskService } from "../tasks/task-service";
 import type { TaskExecutionServices } from "../tasks/task-execution-services";
 import { parseAgentMentions } from "../tasks/mention-parser";
 import type { AnyCommandHandler, CommandHandler } from "./command-handler";
+import type { ProviderHealthService } from "../providers/provider-health-service";
+import { ProviderExecutableSelectedHandler, ProviderHealthListHandler } from "../providers/provider-command-handlers";
 
 export interface CommandHandlerServices {
   projectService: ProjectService;
@@ -16,6 +18,7 @@ export interface CommandHandlerServices {
     | "decideScopeResult" | "grantAdditionalRoundsResult">;
   taskExecutionServices?: TaskExecutionServices;
   taskCommandHandlers?: readonly AnyCommandHandler[];
+  providerHealthService?: ProviderHealthService;
   prepareQuit(deadlineMs: number): Promise<void>;
 }
 
@@ -189,6 +192,10 @@ export function createCommandHandlers(
     handlers["project.addExisting"]!,
     handlers["room.create"]!,
     handlers["message.post"]!,
+    ...(services.providerHealthService ? [
+      new ProviderExecutableSelectedHandler(services.providerHealthService) as AnyCommandHandler,
+      new ProviderHealthListHandler(services.providerHealthService) as AnyCommandHandler,
+    ] : []),
     ...(services.taskCommandHandlers ?? legacyTaskHandlers),
     handlers["worker.prepareQuit"]!
   ];

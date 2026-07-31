@@ -124,11 +124,16 @@ describe("worker database", () => {
 
     expect(database.prepare("PRAGMA journal_mode").get()).toMatchObject({ journal_mode: "wal" });
     expect(database.prepare("PRAGMA foreign_keys").get()).toMatchObject({ foreign_keys: 1 });
-    expect(database.prepare("SELECT count(*) AS count FROM schema_migrations").get()).toEqual({ count: 3 });
+    expect(database.prepare("SELECT count(*) AS count FROM schema_migrations").get()).toEqual({ count: 5 });
     const tables = database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all();
     expect(tables).toEqual(expect.arrayContaining([
       { name: "idempotency_records" },
+      { name: "local_deletion_audit" },
       { name: "projects" },
+      { name: "provider_events" },
+      { name: "provider_installations" },
+      { name: "provider_sessions" },
+      { name: "context_bundles" },
       { name: "room_events" },
       { name: "rooms" },
       { name: "schema_migrations" },
@@ -238,7 +243,7 @@ describe("worker database", () => {
     ])).resolves.toEqual([undefined, undefined]);
 
     const database = openDatabase(filePath);
-    expect(database.prepare("SELECT count(*) AS count FROM schema_migrations").get()).toEqual({ count: 3 });
+    expect(database.prepare("SELECT count(*) AS count FROM schema_migrations").get()).toEqual({ count: 5 });
     database.close();
   });
 });

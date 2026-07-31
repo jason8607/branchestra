@@ -13,6 +13,7 @@ export function createWindowOptions(preloadPath: string): BrowserWindowConstruct
       nodeIntegration: false,
       sandbox: true,
       webviewTag: false
+      ,allowRunningInsecureContent: false
     }
   };
 }

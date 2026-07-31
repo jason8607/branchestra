@@ -1,5 +1,6 @@
 import React from "react";
 import type { RoomEvent } from "../../shared/contracts/domain";
+import { SafeMarkdown } from "./safe-markdown";
 
 function taskId(event: RoomEvent): string | null {
   if (event.type === "task.created") return event.payload.task.id;
@@ -34,7 +35,9 @@ export function Timeline(props: {
                   #{String(event.roomSeq).padStart(4, "0")}
                 </span>
               </header>
-              <p className="event-body">{event.type === "message.posted" ? event.payload.body : event.type}</p>
+              <div className="event-body">
+                {event.type === "message.posted" ? <SafeMarkdown text={event.payload.body} /> : event.type}
+              </div>
               {taskId(event) ? (
                 <button type="button" onClick={() => props.onSelectTask?.(taskId(event)!)}>Open task</button>
               ) : null}

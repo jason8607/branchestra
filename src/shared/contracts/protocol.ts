@@ -11,6 +11,7 @@ import {
   TaskRecordSchema
 } from "./domain";
 import type { FinalApprovalTuple } from "./domain";
+import { ProviderHealthSchema } from "./provider";
 
 export const PROTOCOL_VERSION = 1 as const;
 export const MAX_IPC_BYTES = 65_536;
@@ -71,11 +72,20 @@ const taskRecoveryResolve = z.object({
   decision: z.enum(["resume_recorded_phase", "keep_observed_state", "cancel_and_retain"]),
   selectedOperationIds: z.array(z.string().min(1))
 }).strict();
+const providerPick = z.object({ provider: z.enum(["claude", "codex"]) }).strict();
+const providerSelected = providerPick.extend({ selectedPath: z.string().startsWith("/") }).strict();
+const externalOpen = z.object({
+  url: z.string().min(1).max(4096),
+  userGestureNonce: UuidSchema,
+}).strict();
 
 export const RendererRequestEnvelopeSchema = z.discriminatedUnion("type", [
   z.object({ ...base, workerGeneration: z.union([GenerationSchema, z.literal(ZERO_WORKER_GENERATION)]), type: z.literal("state.getSnapshot"), payload: snapshotRequest }).strict(),
   z.object({ ...base, type: z.literal("room.replay"), payload: RoomEventCursorSchema }).strict(),
   z.object({ ...base, type: z.literal("project.pickExisting"), payload: empty }).strict(),
+  z.object({ ...base, type: z.literal("provider.pickExecutable"), payload: providerPick }).strict(),
+  z.object({ ...base, type: z.literal("provider.health.list"), payload: empty }).strict(),
+  z.object({ ...base, type: z.literal("external.open"), payload: externalOpen }).strict(),
   z.object({ ...base, type: z.literal("room.create"), payload: roomCreate }).strict(),
   z.object({ ...base, type: z.literal("message.post"), payload: messagePost }).strict(),
   z.object({ ...base, type: z.literal("task.get"), payload: taskGet }).strict(),
@@ -92,6 +102,8 @@ export const WorkerRequestEnvelopeSchema = z.discriminatedUnion("type", [
   z.object({ ...base, type: z.literal("state.getSnapshot"), payload: snapshotRequest }).strict(),
   z.object({ ...base, type: z.literal("room.replay"), payload: RoomEventCursorSchema }).strict(),
   z.object({ ...base, type: z.literal("project.addExisting"), payload: z.object({ selectedPath: z.string().min(1) }).strict() }).strict(),
+  z.object({ ...base, type: z.literal("provider.executableSelected"), payload: providerSelected }).strict(),
+  z.object({ ...base, type: z.literal("provider.health.list"), payload: empty }).strict(),
   z.object({ ...base, type: z.literal("room.create"), payload: roomCreate }).strict(),
   z.object({ ...base, type: z.literal("message.post"), payload: messagePost }).strict(),
   z.object({ ...base, type: z.literal("task.get"), payload: taskGet }).strict(),
@@ -105,7 +117,7 @@ export const WorkerRequestEnvelopeSchema = z.discriminatedUnion("type", [
   z.object({ ...base, type: z.literal("worker.prepareQuit"), payload: z.object({ deadlineMs: z.number().int().positive() }).strict() }).strict()
 ]);
 
-const responseData = z.union([AppSnapshotSchema, SnapshotPageSchema, RoomEventPageSchema, ProjectSchema, RoomSchema, RoomEventSchema, TaskRecordSchema, TaskInspectorModelSchema, z.object({ cancelled: z.literal(true) }).strict(), z.object({ prepared: z.literal(true) }).strict()]);
+const responseData = z.union([AppSnapshotSchema, SnapshotPageSchema, RoomEventPageSchema, ProjectSchema, RoomSchema, RoomEventSchema, TaskRecordSchema, TaskInspectorModelSchema, z.array(ProviderHealthSchema), ProviderHealthSchema, z.object({ cancelled: z.literal(true) }).strict(), z.object({ prepared: z.literal(true) }).strict(), z.object({ opened: z.literal(true) }).strict()]);
 export const WorkerResponseEnvelopeSchema = z.object({
   ...base,
   type: z.literal("response"),

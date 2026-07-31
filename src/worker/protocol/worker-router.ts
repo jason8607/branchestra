@@ -85,6 +85,10 @@ function commandFromEnvelope(envelope: WorkerRequestEnvelope): WorkerCommand {
       return { type: envelope.type, payload: envelope.payload };
     case "project.addExisting":
       return { type: envelope.type, payload: envelope.payload };
+    case "provider.executableSelected":
+      return { type: envelope.type, payload: envelope.payload };
+    case "provider.health.list":
+      return { type: envelope.type, payload: envelope.payload };
     case "room.create":
       return { type: envelope.type, payload: envelope.payload };
     case "message.post":

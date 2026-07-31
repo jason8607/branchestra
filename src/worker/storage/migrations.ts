@@ -228,6 +228,60 @@ const DURABLE_TASK_SERVICE_SCHEMA_SQL = `
   );
 `;
 
+export const PROVIDER_RUNTIME_SCHEMA_SQL = `
+  CREATE TABLE provider_installations (
+    provider TEXT PRIMARY KEY CHECK (provider IN ('claude', 'codex')),
+    executable_realpath TEXT NOT NULL,
+    cli_version TEXT NOT NULL,
+    architecture TEXT NOT NULL CHECK (architecture IN ('arm64', 'x64')),
+    state TEXT NOT NULL CHECK (state IN ('missing', 'incompatible', 'unauthenticated', 'policy_disabled', 'ready')),
+    checked_at TEXT NOT NULL
+  );
+  CREATE TABLE context_bundles (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES agent_runs(id),
+    room_id TEXT NOT NULL REFERENCES rooms(id),
+    task_id TEXT NOT NULL REFERENCES tasks(id),
+    version INTEGER NOT NULL CHECK (version > 0),
+    hash TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (run_id, version),
+    UNIQUE (run_id, hash)
+  );
+  CREATE TABLE provider_events (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES agent_runs(id),
+    provider_seq INTEGER NOT NULL CHECK (provider_seq >= 0),
+    payload_json TEXT NOT NULL,
+    received_at TEXT NOT NULL,
+    UNIQUE (run_id, provider_seq)
+  );
+  CREATE TABLE provider_sessions (
+    run_id TEXT PRIMARY KEY REFERENCES agent_runs(id),
+    provider TEXT NOT NULL CHECK (provider IN ('claude', 'codex')),
+    provider_session_id TEXT NOT NULL,
+    context_hash TEXT NOT NULL,
+    last_provider_seq INTEGER NOT NULL DEFAULT 0,
+    resume_state TEXT NOT NULL CHECK (resume_state IN ('active', 'interrupted', 'resumable', 'replaced', 'closed')),
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX provider_sessions_provider_id_idx ON provider_sessions(provider, provider_session_id);
+  ALTER TABLE operation_journal ADD COLUMN process_identity_json TEXT;
+  ALTER TABLE operation_journal ADD COLUMN provider_run_id TEXT;
+  ALTER TABLE operation_journal ADD COLUMN last_signal TEXT;
+  ALTER TABLE operation_journal ADD COLUMN signal_observed_at TEXT;
+`;
+
+const LOCAL_DELETION_AUDIT_SQL = `
+  CREATE TABLE local_deletion_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL CHECK (kind IN ('room','project')),
+    deleted_id TEXT NOT NULL,
+    deleted_at TEXT NOT NULL
+  );
+`;
+
 const migrations = [{
   version: 1,
   sql: `
@@ -283,6 +337,12 @@ const migrations = [{
 }, {
   version: 3,
   sql: DURABLE_TASK_SERVICE_SCHEMA_SQL
+}, {
+  version: 4,
+  sql: PROVIDER_RUNTIME_SCHEMA_SQL
+}, {
+  version: 5,
+  sql: LOCAL_DELETION_AUDIT_SQL
 }] as const;
 
 export function runMigrations(database: Database): void {

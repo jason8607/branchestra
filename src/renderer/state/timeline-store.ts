@@ -8,6 +8,7 @@ import {
   type AppSnapshot,
   type RoomEvent
 } from "../../shared/contracts/domain";
+import { ProviderHealthSchema, type ProviderHealth, type ProviderId } from "../../shared/contracts/provider";
 import type { BranchestraApi } from "../../shared/contracts/renderer-api";
 
 export interface TimelineState {
@@ -18,6 +19,7 @@ export interface TimelineState {
   selectedTaskId: string | null;
   eventsByRoom: Readonly<Record<string, readonly RoomEvent[]>>;
   error: string | null;
+  providerHealth: readonly ProviderHealth[];
 }
 
 export interface TimelineStore {
@@ -27,6 +29,8 @@ export interface TimelineStore {
   selectRoom(roomId: string): Promise<void>;
   selectTask(taskId: string | null): void;
   addProject(): Promise<void>;
+  refreshProviderHealth(): Promise<void>;
+  pickProviderExecutable(provider: ProviderId): Promise<void>;
   createRoom(projectId: string, title: string): Promise<void>;
   postMessage(roomId: string, body: string): Promise<void>;
   dispose(): void;
@@ -88,6 +92,7 @@ export function createTimelineStore(
     selectedRoomId: null,
     selectedTaskId: null,
     eventsByRoom: Object.freeze({}),
+    providerHealth: Object.freeze([]),
     error: null
   });
 
@@ -443,6 +448,24 @@ export function createTimelineStore(
         throw new Error("Task is not present in the current snapshot");
       }
       patchState({ selectedTaskId: taskId });
+    },
+    async refreshProviderHealth() {
+      if (disposed) return;
+      const epoch = lifecycleEpoch;
+      const response = await api.request({ type: "provider.health.list", payload: {}, idempotencyKey: nextId() });
+      if (!isCurrent(epoch)) return;
+      if (!response.payload.ok) throw new Error(response.payload.message);
+      const parsed = ProviderHealthSchema.array().parse(response.payload.data);
+      patchCurrent(epoch, { providerHealth: Object.freeze(parsed.map((item) => Object.freeze(item))) });
+    },
+    async pickProviderExecutable(provider) {
+      if (disposed) return;
+      const epoch = lifecycleEpoch;
+      const response = await api.request({ type: "provider.pickExecutable", payload: { provider }, idempotencyKey: nextId() });
+      if (!isCurrent(epoch)) return;
+      if (!response.payload.ok) throw new Error(response.payload.message);
+      if (response.payload.data && typeof response.payload.data === "object" && "cancelled" in response.payload.data) return;
+      await this.refreshProviderHealth();
     },
     async addProject() {
       if (disposed) return;

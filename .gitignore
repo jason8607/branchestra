@@ -5,6 +5,7 @@
 .superpowers/
 .worktrees/
 node_modules/
+.pnpm-store/
 coverage/
 dist/
 out/

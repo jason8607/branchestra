@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { dirname, resolve } from "node:path";
+import { homedir, tmpdir, userInfo } from "node:os";
 import { mkdir, realpath } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { hashCanonical } from "./approvals/canonical-json";
 import { FinalApprovalService, GitCandidateTupleSource } from "./approvals/final-approval-service";
@@ -26,7 +28,23 @@ import { GitReadService } from "./git/repository-inspector";
 import { JournaledOperationRunner } from "./operations/journaled-operation-runner";
 import { JournaledProcessRunner } from "./operations/journaled-process-runner";
 import { RepositoryLock } from "./operations/repository-lock";
-import { createDefaultTaskProvider } from "./providers/unavailable-provider";
+import { ProviderHealthService } from "./providers/provider-health-service";
+import { RunnerBackedAdapter } from "./providers/runner-backed-adapter";
+import { createProviderRegistry } from "./providers/provider-registry";
+import { RegistryTaskProvider } from "./providers/registry-task-provider";
+import { SupervisedProviderRunner } from "./process/supervised-provider-runner";
+import { normalizeClaudeEvent } from "./providers/normalization/claude-event";
+import { normalizeCodexEvent } from "./providers/normalization/codex-event";
+import { buildProviderEnvironment } from "./providers/provider-environment";
+import { execFileNoShell } from "./process/exec-file";
+import { ProcessIdentityProbe } from "./process/process-identity";
+import { ProviderProcessSupervisor } from "./process/provider-process-supervisor";
+import { validateCodexSubscriptionConfigLock } from "../shared/security/codex-config-lock";
+import { PUBLIC_PROVIDER_RELEASE_POLICY } from "../shared/config/provider-release-policy";
+import { CLAUDE_CAPABILITIES } from "../provider-runner/claude-runtime";
+import { CODEX_CAPABILITIES } from "../provider-runner/codex-runtime";
+import { ReadOnlyToolService } from "./tools/read-only-tool-service";
+import { ToolBridge } from "./tools/tool-bridge";
 import { MockProvider } from "./providers/mock-provider";
 import { e2eMockScript, type E2EMockScenario } from "./providers/e2e-mock-scenarios";
 import { createCommandHandlers } from "./protocol/handlers";
@@ -191,6 +209,23 @@ export async function startWorker(options: WorkerStartOptions): Promise<WorkerRu
 
   try {
     const repositories = createRepositories(database);
+    const architecture = process.arch;
+    if (architecture !== "arm64" && architecture !== "x64") throw new Error(`Unsupported Provider architecture: ${architecture}`);
+    const packagedResources = (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath;
+    const resourcesRootRealpath = packagedResources ?? process.cwd();
+    const providerHealthService = new ProviderHealthService({
+      repository: repositories.providers,
+      runner: execFileNoShell,
+      host: {
+        homeDirectory: homedir(), temporaryDirectory: tmpdir(), userName: userInfo().username,
+        architecture, resourcesRootRealpath,
+      },
+      validateCodexSubscriptionConfigLock: (input) => validateCodexSubscriptionConfigLock({
+        ...input,
+        manifestPath: resolve(resourcesRootRealpath, packagedResources ? "codex-config-lock-manifest.json" : "config/codex-config-lock-manifest.json"),
+      }),
+      now: () => new Date().toISOString(),
+    });
     const eventStore = createEventStore(database, repositories);
     const idempotencyStore = createIdempotencyStore(database, () => new Date().toISOString());
     const ids = { next: randomUUID };
@@ -256,9 +291,113 @@ export async function startWorker(options: WorkerStartOptions): Promise<WorkerRu
         payload: { roomId: null }
       }));
     };
-    const provider = options.e2eMock
-      ? new MockProvider((request) => e2eMockScript(options.e2eMock!.scenario, request))
-      : createDefaultTaskProvider();
+    const provider = (() => {
+      if (options.e2eMock) return new MockProvider((request) => e2eMockScript(options.e2eMock!.scenario, request));
+      const processSupervisor = new ProviderProcessSupervisor({
+        probe: new ProcessIdentityProbe(execFileNoShell),
+        journal: repositories.operations,
+        now: clock.now,
+      });
+      const runner = new SupervisedProviderRunner({
+        supervisor: processSupervisor,
+        runnerEntryRealpath: resolve(dirname(fileURLToPath(import.meta.url)), "provider-runner.js"),
+        workerGeneration: options.identity.workerGeneration,
+        recordIntent(input) {
+          const task = repositories.tasks.getRequired(input.taskId);
+          const project = repositories.projects.findById(task.projectId);
+          if (!project) throw new Error(`PROJECT_NOT_FOUND:${task.projectId}`);
+          const at = clock.now();
+          repositories.operations.recordIntent({
+            id: ids.next(),
+            projectId: project.id,
+            taskId: task.id,
+            repositoryCommonDirRealpath: project.gitCommonDir,
+            operationType: "provider_process",
+            idempotencyKey: `provider-process:${input.runId}`,
+            expected: input,
+            status: "intent",
+            observation: null,
+            workerGeneration: options.identity.workerGeneration,
+            createdAt: at,
+            updatedAt: at,
+          });
+        },
+      });
+      const lockRealpath = async (): Promise<string> => {
+        const decision = await validateCodexSubscriptionConfigLock({
+          resourcesRootRealpath,
+          expectedCliVersion: "0.144.6",
+          manifestPath: resolve(resourcesRootRealpath, packagedResources ? "codex-config-lock-manifest.json" : "config/codex-config-lock-manifest.json"),
+        });
+        if (!decision.valid) throw new Error(decision.reason);
+        return decision.realpath;
+      };
+      const readOnlyTools = new ReadOnlyToolService({
+        git: gitReadService,
+        context: {
+          async search(input) {
+            return database.prepare(`SELECT id AS eventId, room_seq AS roomSeq, payload_json AS payload
+              FROM room_events WHERE room_id = ? AND event_type = 'message.posted' AND payload_json LIKE ?
+              ORDER BY room_seq DESC LIMIT ?`).all(input.roomId, `%${input.query.replaceAll("%", "\\%").replaceAll("_", "\\_")}%`, input.limit);
+          },
+          async read(input) {
+            if (input.eventIds.length === 0) return [];
+            const placeholders = input.eventIds.map(() => "?").join(",");
+            return database.prepare(`SELECT id AS eventId, room_seq AS roomSeq, payload_json AS payload
+              FROM room_events WHERE room_id = ? AND id IN (${placeholders}) ORDER BY room_seq LIMIT ?`)
+              .all(input.roomId, ...input.eventIds, input.limit);
+          },
+        },
+      });
+      const adapter = (providerId: "claude" | "codex") => new RunnerBackedAdapter({
+        provider: providerId,
+        capabilities: providerId === "claude" ? CLAUDE_CAPABILITIES : CODEX_CAPABILITIES,
+        health: providerHealthService,
+        codexConfigLockRealpath: lockRealpath,
+        runner,
+        normalize: providerId === "claude" ? normalizeClaudeEvent : normalizeCodexEvent,
+        now: clock.now,
+        repository: repositories.providers,
+        async handleToolCall(input) {
+          const task = repositories.tasks.getRequired(input.taskRequest.taskId);
+          const project = repositories.projects.findById(task.projectId);
+          if (!project) throw new Error(`PROJECT_NOT_FOUND:${task.projectId}`);
+          const bridge = new ToolBridge(readOnlyTools, () => ({
+            roomId: task.roomId,
+            taskId: task.id,
+            repositoryRootRealpath: project.repositoryRoot,
+            worktreePathRealpath: input.taskRequest.worktreePath,
+            startOid: task.baseOid,
+            checkpointOids: new Set(artifacts.listCheckpoints(task.id).map((checkpoint) => checkpoint.oid)),
+          }));
+          const result = await bridge.handle(input);
+          return { content: result.content, truncated: result.truncated };
+        },
+        environmentFor(health) {
+          if (!health.executableRealpath) throw new Error(`PROVIDER_EXECUTABLE_MISSING:${providerId}`);
+          return buildProviderEnvironment({
+            provider: providerId,
+            executableRealpath: health.executableRealpath,
+            homeDirectory: homedir(),
+            temporaryDirectory: tmpdir(),
+            userName: userInfo().username,
+            approvedPathEntries: [],
+            source: process.env,
+          });
+        },
+      });
+      return new RegistryTaskProvider(createProviderRegistry({
+        policy: {
+          claudeSubscription: { enabled: PUBLIC_PROVIDER_RELEASE_POLICY.claudeSubscription.enabled },
+          codexSubscription: {
+            enabled: PUBLIC_PROVIDER_RELEASE_POLICY.codexSubscription.enabled
+              && PUBLIC_PROVIDER_RELEASE_POLICY.codexSubscription.policyStatus === "allowed",
+          },
+        },
+        createClaudeAdapter: () => adapter("claude"),
+        createCodexAdapter: () => adapter("codex"),
+      }));
+    })();
     const taskExecutionServices = createTaskExecutionServices({
       repositories,
       artifacts,
@@ -396,6 +535,7 @@ export async function startWorker(options: WorkerStartOptions): Promise<WorkerRu
         taskService,
         taskExecutionServices,
         taskCommandHandlers,
+        providerHealthService,
         prepareQuit: runtime.prepareQuit
       })
     });

@@ -625,6 +625,7 @@ describe("renderer gateway", () => {
       request: vi.fn(),
       subscribe: vi.fn(() => unsubscribe),
       stop: vi.fn(),
+      forceCrashForTest: vi.fn(),
       getGeneration: vi.fn(() => generation)
     };
     vi.mocked(createWorkerSupervisor).mockReturnValueOnce(supervisor);
@@ -660,6 +661,7 @@ describe("renderer gateway", () => {
     const unsubscribe = vi.fn();
     vi.mocked(createWorkerSupervisor).mockReturnValueOnce({
       start: vi.fn(), request: vi.fn(), subscribe: vi.fn(() => unsubscribe), stop: vi.fn(),
+      forceCrashForTest: vi.fn(),
       getGeneration: vi.fn(() => generation)
     });
 

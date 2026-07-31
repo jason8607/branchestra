@@ -1,0 +1,81 @@
+name: Release
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+permissions:
+  contents: write
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - { arch: arm64, runner: macos-15 }
+          - { arch: x64, runner: macos-15-intel }
+    runs-on: ${{ matrix.runner }}
+    environment: release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 11.15.1 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 24.18.0, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint && pnpm test && pnpm test:security && pnpm verify:release-policy
+      - run: pnpm package:mac:${{ matrix.arch }}
+        env:
+          BRANCHESTRA_BUNDLE_ID: ${{ vars.BRANCHESTRA_BUNDLE_ID }}
+          BRANCHESTRA_GITHUB_OWNER: ${{ github.repository_owner }}
+          CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      - run: pnpm verify:mac -- release/mac-${{ matrix.arch }}/Branchestra.app ${{ matrix.arch }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac-${{ matrix.arch }}
+          path: |
+            release/*-${{ matrix.arch }}.dmg
+            release/*-${{ matrix.arch }}.zip
+  publish:
+    needs: build
+    runs-on: macos-15
+    environment: release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { pattern: "mac-*", path: dist-assets, merge-multiple: true }
+      - name: Verify tag and create GitHub Release
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          test "v${version}" = "$GITHUB_REF_NAME"
+          test -f "dist-assets/Branchestra-${version}-mac-arm64.dmg"
+          test -f "dist-assets/Branchestra-${version}-mac-x64.dmg"
+          gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes dist-assets/*.dmg dist-assets/*.zip
+      - name: Render Homebrew Cask
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          arm_sha="$(shasum -a 256 "dist-assets/Branchestra-${version}-mac-arm64.dmg" | awk '{print $1}')"
+          x64_sha="$(shasum -a 256 "dist-assets/Branchestra-${version}-mac-x64.dmg" | awk '{print $1}')"
+          node scripts/render-homebrew-cask.mjs --owner "$GITHUB_REPOSITORY_OWNER" --version "$version" --arm64-sha256 "$arm_sha" --x64-sha256 "$x64_sha" --output dist/homebrew/branchestra.rb
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tap
+      - name: Audit and publish Cask
+        working-directory: homebrew-tap
+        run: |
+          set -euo pipefail
+          install -m 0644 ../dist/homebrew/branchestra.rb Casks/branchestra.rb
+          brew audit --cask --online branchestra
+          git config user.name "branchestra-release-bot"
+          git config user.email "branchestra-release-bot@users.noreply.github.com"
+          git add Casks/branchestra.rb
+          git diff --cached --check
+          git commit -m "chore: update branchestra ${GITHUB_REF_NAME}"
+          git push

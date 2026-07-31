@@ -5,7 +5,9 @@
   "type": "module",
   "main": "./out/main/index.js",
   "packageManager": "pnpm@11.15.1",
-  "engines": { "node": "24.18.0" },
+  "engines": {
+    "node": "24.18.0"
+  },
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
@@ -14,14 +16,27 @@
     "test": "pnpm test:unit && pnpm test:integration",
     "test:unit": "vitest run tests/unit",
     "test:integration": "vitest run tests/integration --testTimeout=15000",
-    "test:e2e": "pnpm build && playwright test"
+    "test:e2e": "pnpm build && playwright test",
+    "test:security": "vitest run tests/security --testTimeout=30000",
+    "verify:release-policy": "node scripts/verify-release-policy.mjs",
+    "verify:package": "node scripts/verify-package-contents.mjs",
+    "licenses:check": "pnpm licenses list --prod --json",
+    "package:mac:arm64": "pnpm build && electron-builder --config electron-builder.config.mjs --mac --arm64",
+    "package:mac:x64": "pnpm build && electron-builder --config electron-builder.config.mjs --mac --x64",
+    "verify:mac": "bash scripts/verify-macos-artifact.sh",
+    "verify:all": "pnpm typecheck && pnpm lint && pnpm test && pnpm test:security && pnpm build && pnpm playwright test && pnpm verify:release-policy && pnpm licenses:check"
   },
   "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.216",
+    "@openai/codex-sdk": "0.144.6",
     "react": "19.2.7",
     "react-dom": "19.2.7",
+    "react-markdown": "10.1.0",
+    "rehype-sanitize": "6.0.0",
     "zod": "4.4.3"
   },
   "devDependencies": {
+    "@electron/asar": "4.2.0",
     "@eslint/js": "10.0.1",
     "@playwright/test": "1.61.1",
     "@swc/core": "1.15.46",
@@ -33,6 +48,7 @@
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "5.2.0",
     "electron": "43.1.1",
+    "electron-builder": "26.15.3",
     "electron-vite": "5.0.0",
     "eslint": "10.6.0",
     "globals": "17.7.0",

@@ -4,6 +4,7 @@ import { Inspector } from "./components/Inspector";
 import { ProjectRail } from "./components/ProjectRail";
 import { Timeline } from "./components/Timeline";
 import { useTaskInspector } from "./features/tasks/use-task-inspector";
+import { ProviderHealthStep } from "./features/onboarding/ProviderHealthStep";
 import type { TimelineStore } from "./state/timeline-store";
 
 export function App({ store }: { store: TimelineStore }): React.JSX.Element {
@@ -33,6 +34,11 @@ export function App({ store }: { store: TimelineStore }): React.JSX.Element {
           <h1>Shared Timeline</h1>
           {state.error ? <p className="connection-error" role="alert">{state.error}</p> : null}
         </header>
+        {state.snapshot.projects.length === 0 ? <ProviderHealthStep
+          health={state.providerHealth}
+          onPick={(provider) => void store.pickProviderExecutable(provider)}
+          onRefresh={() => void store.refreshProviderHealth()}
+        /> : null}
         <Timeline events={events} onSelectTask={(taskId) => store.selectTask(taskId)} />
         <Composer
           disabled={!room || state.connection !== "ready"}

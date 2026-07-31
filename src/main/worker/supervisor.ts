@@ -23,6 +23,7 @@ export interface WorkerSupervisor {
   subscribe(listener: (event: WorkerEventEnvelope) => void): () => void;
   stop(deadlineMs: number): Promise<void>;
   getGeneration(): string | null;
+  forceCrashForTest(): void;
 }
 
 export interface WorkerSupervisorDependencies {
@@ -261,6 +262,10 @@ export function createWorkerSupervisor(dependencies: WorkerSupervisorDependencie
     subscribe(listener) {
       listeners.add(listener);
       return () => listeners.delete(listener);
+    },
+    forceCrashForTest() {
+      if (active === null || state !== "ready") throw new Error("Worker is not ready");
+      active.process.kill();
     },
     stop(deadlineMs) {
       if (stopPromise !== null) return stopPromise;

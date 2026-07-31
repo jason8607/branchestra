@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 
 export interface ExecFileOptions {
   cwd?: string;
+  env?: Record<string, string>;
   timeoutMs: number;
   maxBufferBytes: number;
 }
@@ -20,6 +21,7 @@ export type ExecFileRunner = (
 export const execFileNoShell: ExecFileRunner = (executable, args, options) => new Promise((resolve, reject) => {
   execFile(executable, [...args], {
     ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
+    ...(options.env === undefined ? {} : { env: options.env }),
     encoding: "utf8",
     timeout: options.timeoutMs,
     maxBuffer: options.maxBufferBytes,

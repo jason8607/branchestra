@@ -1,4 +1,5 @@
 import type { Database } from "../storage/database";
+import type { ProviderProcessIdentity } from "../process/process-identity";
 
 export type OperationStatus = "intent" | "executing" | "observed" | "completed" | "needs_attention";
 
@@ -180,6 +181,23 @@ export class OperationJournal {
     this.db.prepare(
       "UPDATE operation_journal SET status = ?, observation_json = ? WHERE id = ? AND status <> 'completed'"
     ).run(outcome === "applied" ? "completed" : "needs_attention", canonicalJson({ outcome, actual: observation }), id);
+  }
+
+  recordProviderIdentity(runId: string, identity: ProviderProcessIdentity, at: string): void {
+    const result = this.db.prepare(`UPDATE operation_journal SET provider_run_id = ?, process_identity_json = ?, updated_at = ?
+      WHERE operation_type = 'provider_process' AND provider_run_id IS NULL AND json_extract(expected_json, '$.runId') = ?`)
+      .run(runId, canonicalJson(identity), at, runId);
+    if (result.changes !== 1) throw new Error(`PROVIDER_PROCESS_INTENT_NOT_FOUND:${runId}`);
+  }
+
+  recordProviderSignal(runId: string, signal: "abort" | "SIGTERM" | "SIGKILL", at: string): void {
+    const result = this.db.prepare("UPDATE operation_journal SET last_signal = ?, signal_observed_at = ?, updated_at = ? WHERE provider_run_id = ? AND status <> 'completed'")
+      .run(signal, at, at, runId);
+    if (result.changes !== 1) throw new Error(`PROVIDER_PROCESS_NOT_FOUND:${runId}`);
+  }
+
+  completeProviderProcess(runId: string, at: string): void {
+    this.db.prepare("UPDATE operation_journal SET status = 'completed', updated_at = ? WHERE provider_run_id = ? AND status <> 'completed'").run(at, runId);
   }
 
   private getRequired(id: string): OperationRecord {

@@ -1,3 +1,4 @@
 allowBuilds:
   '@swc/core': true
+  electron-winstaller: false
   esbuild: true

@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "publicFeatures": { "claudeSubscription": false, "codexSubscription": false },
+  "providers": {
+    "claude": {
+      "status": "blocked", "sdkVersion": "0.3.216", "cliVersion": "2.1.206",
+      "reviewedAt": "2026-07-31", "sourceUrl": "https://code.claude.com/docs/en/legal-and-compliance",
+      "policyEvidence": null, "enforcementReports": []
+    },
+    "codex": {
+      "status": "pending_evidence", "sdkVersion": "0.144.6", "cliVersion": "0.144.6",
+      "reviewedAt": "2026-07-31", "sourceUrl": "https://help.openai.com/en/articles/11369540-using-codex-with-your-chatgpt-plan",
+      "policyEvidence": null, "enforcementReports": []
+    }
+  }
+}

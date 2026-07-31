@@ -85,6 +85,7 @@ function timelineState(): TimelineState {
     selectedRoomId: ROOM_ID,
     selectedTaskId: null,
     eventsByRoom: { [ROOM_ID]: [messageEvent()] },
+    providerHealth: [],
     error: null
   };
 }
@@ -98,6 +99,8 @@ function preloadedTimelineStore(): TimelineStore {
     selectRoom: vi.fn().mockResolvedValue(undefined),
     selectTask: vi.fn(),
     addProject: vi.fn().mockResolvedValue(undefined),
+    refreshProviderHealth: vi.fn().mockResolvedValue(undefined),
+    pickProviderExecutable: vi.fn().mockResolvedValue(undefined),
     createRoom: vi.fn().mockResolvedValue(undefined),
     postMessage: vi.fn().mockResolvedValue(undefined),
     dispose: vi.fn()

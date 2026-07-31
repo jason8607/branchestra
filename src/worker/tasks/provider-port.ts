@@ -15,6 +15,7 @@ export interface TaskProviderRunRequest {
   runId: string;
   taskId: string;
   provider: TaskProviderName;
+  executableRealpath?: string;
   role: TaskProviderRole;
   worktreePath: string;
   instruction: string;

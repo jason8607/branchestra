@@ -1,0 +1,1 @@
+{"type":"turn.failed","error":{"code":"sandbox_denied","message":"write denied outside workspace"}}
