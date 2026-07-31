@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { NotFoundError } from "../../src/worker/domain/errors";
 import { GitRepositoryError } from "../../src/worker/git/inspect-repository";
+import { GitReadError } from "../../src/worker/git/repository-inspector";
 import { IdempotencyConflictError } from "../../src/worker/storage/idempotency-store";
 import type { CommandHandler } from "../../src/worker/protocol/command-handler";
 import { createCommandHandlers } from "../../src/worker/protocol/handlers";
@@ -57,6 +58,13 @@ describe("worker router", () => {
         getSnapshot: () => ({ projects: [], rooms: [], roomCursors: {} }),
         replayRoom: () => ({ roomId: room.id, events: [], nextRoomSeq: 0, hasMore: false })
       },
+      taskService: {
+        createFromUserMessage: vi.fn(),
+        decideScope: vi.fn(),
+        grantAdditionalRounds: vi.fn(),
+        decideScopeResult: vi.fn(),
+        grantAdditionalRoundsResult: vi.fn()
+      },
       prepareQuit: async () => undefined
     });
 
@@ -67,6 +75,8 @@ describe("worker router", () => {
       "project.addExisting",
       "room.create",
       "message.post",
+      "task.approveScope",
+      "task.grantAdditionalRound",
       "worker.prepareQuit"
     ]);
     expect(new Set(types).size).toBe(types.length);
@@ -124,6 +134,13 @@ describe("worker router", () => {
         getSnapshot: () => ({ projects: [project], rooms, roomCursors: Object.fromEntries(rooms.map((room) => [room.id, 0])) }),
         replayRoom: vi.fn()
       },
+      taskService: {
+        createFromUserMessage: vi.fn(),
+        decideScope: vi.fn(),
+        grantAdditionalRounds: vi.fn(),
+        decideScopeResult: vi.fn(),
+        grantAdditionalRoundsResult: vi.fn()
+      },
       prepareQuit: async () => undefined
     });
     const route = createWorkerRouter({ workerGeneration: activeGeneration, handlers });
@@ -145,6 +162,7 @@ describe("worker router", () => {
   it.each([
     [new IdempotencyConflictError("Idempotency key conflict: snapshot-1"), "IDEMPOTENCY_CONFLICT", "Idempotency key conflict: snapshot-1"],
     [new GitRepositoryError("Selected directory is not a Git repository with a valid HEAD"), "GIT_INVALID", "Selected directory is not a Git repository with a valid HEAD"],
+    [new GitReadError("REPOSITORY_IDENTITY_MISMATCH"), "GIT_INVALID", "REPOSITORY_IDENTITY_MISMATCH"],
     [new NotFoundError("Project not found: project-1"), "NOT_FOUND", "Project not found: project-1"],
     [new Error("configuration not found"), "INTERNAL", "Worker command failed"],
     [new Error("database is unavailable"), "INTERNAL", "Worker command failed"]

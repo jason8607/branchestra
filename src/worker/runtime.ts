@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { dirname, resolve } from "node:path";
 import { z } from "zod";
+import { hashCanonical } from "./approvals/canonical-json";
 import { RoomEventSchema } from "../shared/contracts/domain";
 import {
   assertEnvelopeSize,
@@ -12,6 +14,13 @@ import {
 import { createProjectService } from "./domain/project-service";
 import { createRoomService } from "./domain/room-service";
 import { inspectExistingRepository } from "./git/inspect-repository";
+import { GitCommandRunner } from "./git/git-command-runner";
+import { GitArtifactRepository } from "./git/git-artifact-repository";
+import { GitManager } from "./git/git-manager";
+import { GitReadService } from "./git/repository-inspector";
+import { JournaledOperationRunner } from "./operations/journaled-operation-runner";
+import { RepositoryLock } from "./operations/repository-lock";
+import { createDefaultTaskProvider } from "./providers/unavailable-provider";
 import { createCommandHandlers } from "./protocol/handlers";
 import { createWorkerRouter } from "./protocol/worker-router";
 import { openDatabase } from "./storage/database";
@@ -20,6 +29,8 @@ import { createIdempotencyStore } from "./storage/idempotency-store";
 import { runMigrations } from "./storage/migrations";
 import { createRepositories } from "./storage/repositories";
 import { createWorkerLeaseStore, type WorkerIdentity } from "./storage/worker-lease-store";
+import { TaskService } from "./tasks/task-service";
+import { createTaskExecutionServices } from "./tasks/task-execution-services";
 
 export interface WorkerPort {
   postMessage(value: unknown): void;
@@ -175,9 +186,60 @@ export async function startWorker(options: WorkerStartOptions): Promise<WorkerRu
       ids
     });
     const roomService = createRoomService({ repositories, eventStore, idempotencyStore, clock, ids });
+    const git = new GitCommandRunner();
+    const gitReadService = new GitReadService(git);
+    const managedWorktreeRoot = resolve(dirname(options.dbPath), "managed-worktrees");
+    const taskService = new TaskService({
+      repositories,
+      eventStore,
+      idempotencyStore,
+      gitReadService,
+      managedWorktreeRoot,
+      workerGeneration: options.identity.workerGeneration,
+      id: ids.next,
+      now: clock.now
+    });
+    const artifacts = new GitArtifactRepository(database);
+    const operations = new JournaledOperationRunner(repositories.operations);
+    const manager = new GitManager({
+      git,
+      readService: gitReadService,
+      artifacts,
+      projects: repositories.projects,
+      tasks: repositories.tasks,
+      lock: new RepositoryLock(),
+      operations,
+      journal: repositories.operations,
+      managedWorktreeRoot,
+      id: ids.next,
+      now: clock.now
+    });
+    const provider = createDefaultTaskProvider();
+    const taskExecutionServices = createTaskExecutionServices({
+      repositories,
+      artifacts,
+      events: eventStore,
+      manager,
+      provider,
+      operations,
+      workerGeneration: options.identity.workerGeneration,
+      contextVersion: 1,
+      contextHash: hashCanonical({
+        source: "worker-runtime",
+        workerGeneration: options.identity.workerGeneration
+      }),
+      id: ids.next,
+      now: clock.now
+    });
     const router = createWorkerRouter({
       workerGeneration: options.identity.workerGeneration,
-      handlers: createCommandHandlers({ projectService, roomService, prepareQuit: runtime.prepareQuit })
+      handlers: createCommandHandlers({
+        projectService,
+        roomService,
+        taskService,
+        taskExecutionServices,
+        prepareQuit: runtime.prepareQuit
+      })
     });
     const onMessage = (value: unknown): void => {
       void (async () => {

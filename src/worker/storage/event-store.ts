@@ -2,8 +2,7 @@ import type {
   AppSnapshot,
   RoomEvent,
   RoomEventCursor,
-  RoomEventPage,
-  UserMessage
+  RoomEventPage
 } from "../../shared/contracts/domain";
 import {
   AppSnapshotSchema,
@@ -13,16 +12,13 @@ import {
 import { MAX_IPC_BYTES, encodedEnvelopeBytes } from "../../shared/contracts/protocol";
 import { NotFoundError } from "../domain/errors";
 import type { Database } from "./database";
-import type { DomainRepositories } from "./repositories";
+import type { EventStoreRepositories } from "./repositories";
 
-export interface AppendRoomEventInput {
-  id: string;
-  roomId: string;
-  type: "message.posted";
-  actor: "user" | "claude" | "codex" | "system";
-  payload: UserMessage;
-  createdAt: string;
-}
+export type AppendRoomEventInput = RoomEvent extends infer TEvent
+  ? TEvent extends RoomEvent
+    ? Omit<TEvent, "roomSeq">
+    : never
+  : never;
 
 export interface EventStore {
   append(input: AppendRoomEventInput): RoomEvent;
@@ -30,8 +26,25 @@ export interface EventStore {
   after(cursor: RoomEventCursor): RoomEventPage;
 }
 
-export function createEventStore(database: Database, repositories: DomainRepositories): EventStore {
-  return {
+const canonicalStores = new WeakMap<
+  EventStoreRepositories,
+  { database: Database; store: EventStore }
+>();
+const storeDatabases = new WeakMap<EventStore, Database>();
+
+export function assertCanonicalEventStore(database: Database, store: EventStore): void {
+  const storeDatabase = storeDatabases.get(store);
+  if (!storeDatabase) throw new Error("TASK_EVENT_STORE_NOT_CANONICAL");
+  if (storeDatabase !== database) throw new Error("TASK_EVENT_STORE_DATABASE_MISMATCH");
+}
+
+export function createEventStore(database: Database, repositories: EventStoreRepositories): EventStore {
+  const canonical = canonicalStores.get(repositories);
+  if (canonical) {
+    if (canonical.database !== database) throw new Error("EVENT_STORE_DATABASE_MISMATCH");
+    return canonical.store;
+  }
+  const store: EventStore = {
     append(input) {
       return database.transaction(() => {
         if (!repositories.rooms.findById(input.roomId)) {
@@ -39,7 +52,7 @@ export function createEventStore(database: Database, repositories: DomainReposit
         }
         const row = database.prepare("SELECT COALESCE(MAX(room_seq), 0) + 1 AS next_seq FROM room_events WHERE room_id = ?").get(input.roomId) as { next_seq: number };
         const event = RoomEventSchema.parse({ ...input, roomSeq: row.next_seq });
-        if (event.payload.roomId !== event.roomId) {
+        if (event.type === "message.posted" && event.payload.roomId !== event.roomId) {
           throw new Error(`Event payload roomId does not match event roomId: ${event.id}`);
         }
         database.prepare("INSERT INTO room_events(id, room_id, room_seq, event_type, actor, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").run(event.id, event.roomId, event.roomSeq, event.type, event.actor, JSON.stringify(event.payload), event.createdAt);
@@ -90,4 +103,7 @@ export function createEventStore(database: Database, repositories: DomainReposit
       return RoomEventPageSchema.parse({ roomId: cursor.roomId, events, nextRoomSeq, hasMore });
     }
   };
+  storeDatabases.set(store, database);
+  canonicalStores.set(repositories, { database, store });
+  return store;
 }

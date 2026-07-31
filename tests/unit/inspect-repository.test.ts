@@ -94,4 +94,14 @@ describe("inspectExistingRepository", () => {
     expect(gitError.cause.stderr).toBe("fatal: not a git repository\n");
   });
 
+  it.each(["a".repeat(41), "a".repeat(63)])("rejects a non-exact legacy HEAD OID length", async (headOid) => {
+    const outputs = ["/canonical/repo\n", "/canonical/repo/.git\n", `${headOid}\n`, "main\n"];
+    const execFile: ExecFileRunner = async () => ({ stdout: outputs.shift() ?? "", stderr: "" });
+    await expect(inspectExistingRepository("/chosen", {
+      execFile,
+      realpath: async (path) => path,
+      gitExecutable: "/usr/bin/git"
+    })).rejects.toThrow(GitRepositoryError);
+  });
+
 });

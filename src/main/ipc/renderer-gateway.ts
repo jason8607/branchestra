@@ -92,11 +92,15 @@ export function registerRendererGateway(dependencies: RendererGatewayDependencie
       case "room.replay":
       case "room.create":
       case "message.post":
+      case "task.approveScope":
+      case "task.grantAdditionalRound":
         workerRequest = WorkerRequestEnvelopeSchema.parse({
           ...request,
           workerGeneration: activeGeneration
         });
         break;
+      default:
+        throw new Error(`Unsupported renderer command: ${request.type}`);
     }
     const workerResponse = parseEnvelope(WorkerResponseEnvelopeSchema,
       await dependencies.supervisor.request(workerRequest)

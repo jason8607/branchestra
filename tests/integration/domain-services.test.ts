@@ -71,7 +71,8 @@ describe("foundation domain services", () => {
       );
 
       expect(replayed).toMatchObject({ replayed: true, value: { id: first.value.id, roomSeq: 1 } });
-      expect(rooms.replayRoom({ roomId: roomA.id, roomSeq: 0, limit: 100 }).events.map((event) => event.payload.body)).toEqual(["Persist this"]);
+      expect(rooms.replayRoom({ roomId: roomA.id, roomSeq: 0, limit: 100 }).events
+        .filter((event) => event.type === "message.posted").map((event) => event.payload.body)).toEqual(["Persist this"]);
       expect(rooms.replayRoom({ roomId: roomB.id, roomSeq: 0, limit: 100 }).events).toEqual([]);
       expect(rooms.getSnapshot()).toMatchObject({
         projects: [{ id: project.id }],
@@ -197,6 +198,42 @@ describe("foundation domain services", () => {
         requestHash: "long-name-project-hash",
         workerGeneration: "50000000-0000-4000-8000-000000000001"
       })).rejects.toThrow();
+      expect(idCalls).toBe(0);
+      expect(database.prepare("SELECT count(*) AS count FROM idempotency_records").get()).toEqual({ count: 0 });
+    } finally {
+      database.close();
+    }
+  });
+
+  it("rejects an unsupported inspected branch before storing a project or allocating an ID", async () => {
+    const database = openDatabase(":memory:");
+    try {
+      runMigrations(database);
+      const repositories = createRepositories(database);
+      let idCalls = 0;
+      const projects = createProjectService({
+        repositories,
+        idempotencyStore: createIdempotencyStore(database, () => "2026-07-21T12:00:00.000Z"),
+        inspectRepository: async () => ({
+          repositoryRoot: "/repo",
+          gitCommonDir: "/repo/.git",
+          headOid: "a".repeat(40),
+          defaultBranch: "日本語"
+        }),
+        clock: { now: () => "2026-07-21T12:00:00.000Z" },
+        ids: { next: () => {
+          idCalls += 1;
+          return "10000000-0000-4000-8000-000000000001";
+        } }
+      });
+
+      await expect(projects.addExistingProject({ selectedPath: "/repo" }, {
+        idempotencyKey: "unsupported-project-ref",
+        requestType: "project.addExisting",
+        requestHash: "unsupported-project-ref-hash",
+        workerGeneration: "50000000-0000-4000-8000-000000000001"
+      })).rejects.toThrow("GIT_REF_UNSUPPORTED");
+      expect(repositories.projects.list()).toEqual([]);
       expect(idCalls).toBe(0);
       expect(database.prepare("SELECT count(*) AS count FROM idempotency_records").get()).toEqual({ count: 0 });
     } finally {

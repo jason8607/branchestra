@@ -1,5 +1,8 @@
+import type { execFile as nodeExecFile } from "node:child_process";
 import { realpath as nodeRealpath } from "node:fs/promises";
-import { execFileNoShell, type ExecFileRunner } from "../process/exec-file";
+import type { ExecFileRunner } from "../process/exec-file";
+import { GitCommandRunner, type GitCommandResult } from "./git-command-runner";
+import { assertBranchName, assertGitOid, GitValidationError } from "./git-validation";
 
 export interface RepositoryInspection {
   repositoryRoot: string;
@@ -16,12 +19,6 @@ export interface RepositoryInspectorDependencies {
 
 export class GitRepositoryError extends Error {}
 
-const productionDependencies: RepositoryInspectorDependencies = {
-  execFile: execFileNoShell,
-  realpath: nodeRealpath,
-  gitExecutable: "/usr/bin/git"
-};
-
 function removeGitLineTerminator(output: string): string {
   if (output.endsWith("\r\n")) return output.slice(0, -2);
   if (output.endsWith("\n")) return output.slice(0, -1);
@@ -30,24 +27,50 @@ function removeGitLineTerminator(output: string): string {
 
 export async function inspectExistingRepository(
   selectedPath: string,
-  dependencies: RepositoryInspectorDependencies = productionDependencies
+  dependencies?: RepositoryInspectorDependencies
 ): Promise<RepositoryInspection> {
   try {
-    const selected = await dependencies.realpath(selectedPath);
-    const run = async (args: readonly string[]): Promise<string> => (
-      await dependencies.execFile(dependencies.gitExecutable, args, {
+    const canonicalize = dependencies?.realpath ?? nodeRealpath;
+    if (dependencies?.gitExecutable !== undefined && dependencies.gitExecutable !== "/usr/bin/git") {
+      throw new Error("Git executable must be /usr/bin/git");
+    }
+    const compatibilityExecFile = dependencies === undefined ? undefined : ((
+      executable: string,
+      argv: readonly string[],
+      _options: unknown,
+      callback: (error: Error | null, stdout: string, stderr: string) => void
+    ) => {
+      const cwdIndex = argv.indexOf("-C");
+      if (cwdIndex === -1) {
+        callback(new Error("Git runner omitted -C"), "", "");
+        return undefined;
+      }
+      void dependencies.execFile(executable, argv.slice(cwdIndex), {
         timeoutMs: 5_000,
         maxBufferBytes: 1_048_576
-      })
-    ).stdout;
-    const runGit = async (args: readonly string[]): Promise<string> => removeGitLineTerminator(await run(args));
-    const repositoryRootOutput = await runGit(["-C", selected, "rev-parse", "--path-format=absolute", "--show-toplevel"]);
-    const repositoryRoot = await dependencies.realpath(repositoryRootOutput);
-    const gitCommonDirOutput = await runGit(["-C", repositoryRoot, "rev-parse", "--path-format=absolute", "--git-common-dir"]);
-    const gitCommonDir = await dependencies.realpath(gitCommonDirOutput);
-    const headOid = await runGit(["-C", repositoryRoot, "rev-parse", "--verify", "HEAD^{commit}"]);
-    const branch = await runGit(["-C", repositoryRoot, "rev-parse", "--abbrev-ref", "HEAD"]);
-    if (!/^[0-9a-f]{40,64}$/.test(headOid)) throw new Error("HEAD is not a commit OID");
+      }).then(
+        (result: GitCommandResult) => callback(null, result.stdout, result.stderr),
+        (error: unknown) => {
+          const failure = error instanceof Error ? error : new Error("Git execution failed");
+          const stderr = "stderr" in failure && typeof failure.stderr === "string" ? failure.stderr : "";
+          callback(failure, "", stderr);
+        }
+      );
+      return undefined;
+    }) as unknown as typeof nodeExecFile;
+    const git = new GitCommandRunner(compatibilityExecFile === undefined ? {} : { execFile: compatibilityExecFile });
+    const selected = await canonicalize(selectedPath);
+    const runGit = async (cwd: string, args: readonly string[]): Promise<string> => (
+      removeGitLineTerminator((await git.run(cwd, args)).stdout)
+    );
+    const repositoryRootOutput = await runGit(selected, ["rev-parse", "--path-format=absolute", "--show-toplevel"]);
+    const repositoryRoot = await canonicalize(repositoryRootOutput);
+    const gitCommonDirOutput = await runGit(repositoryRoot, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+    const gitCommonDir = await canonicalize(gitCommonDirOutput);
+    const headOid = await runGit(repositoryRoot, ["rev-parse", "--verify", "HEAD^{commit}"]);
+    const branch = await runGit(repositoryRoot, ["rev-parse", "--abbrev-ref", "HEAD"]);
+    assertGitOid(headOid);
+    if (branch !== "HEAD") assertBranchName(branch);
     return {
       repositoryRoot,
       gitCommonDir,
@@ -55,6 +78,7 @@ export async function inspectExistingRepository(
       defaultBranch: branch === "HEAD" ? null : branch
     };
   } catch (error) {
+    if (error instanceof GitValidationError && error.message === "GIT_REF_UNSUPPORTED") throw error;
     throw new GitRepositoryError(
       "Selected directory is not a Git repository with a valid HEAD",
       { cause: error }

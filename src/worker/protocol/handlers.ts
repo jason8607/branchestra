@@ -3,11 +3,18 @@ import { SnapshotPageSchema, type AppSnapshot, type SnapshotPage } from "../../s
 import { MAX_IPC_BYTES, encodedEnvelopeBytes, type WorkerCommand } from "../../shared/contracts/protocol";
 import type { ProjectService } from "../domain/project-service";
 import type { RoomService } from "../domain/room-service";
+import type { TaskService } from "../tasks/task-service";
+import type { TaskExecutionServices } from "../tasks/task-execution-services";
+import { parseAgentMentions } from "../tasks/mention-parser";
 import type { AnyCommandHandler, CommandHandler } from "./command-handler";
 
 export interface CommandHandlerServices {
   projectService: ProjectService;
   roomService: RoomService;
+  taskService: Pick<TaskService,
+    "createFromUserMessage" | "decideScope" | "grantAdditionalRounds"
+    | "decideScopeResult" | "grantAdditionalRoundsResult">;
+  taskExecutionServices?: TaskExecutionServices;
   prepareQuit(deadlineMs: number): Promise<void>;
 }
 
@@ -104,8 +111,57 @@ export function createCommandHandlers(
     },
     "message.post": {
       type: "message.post",
-      handle: (command, context) => {
-        const result = services.roomService.postUserMessage(command.payload, context.durable(command));
+      handle: async (command, context) => {
+        const result = services.roomService.postUserMessage({
+          roomId: command.payload.roomId,
+          body: command.payload.body
+        }, context.durable(command));
+        if (parseAgentMentions(command.payload.body).length > 0) {
+          await services.taskService.createFromUserMessage({
+            roomId: command.payload.roomId,
+            messageEventId: result.value.id,
+            text: command.payload.body,
+            explicitLead: command.payload.leadProvider ?? null,
+            idempotencyKey: context.idempotencyKey,
+            ...(command.payload.commandClasses === undefined
+              ? {}
+              : { commandClasses: command.payload.commandClasses }),
+            ...(command.payload.allowCollaborator === undefined
+              ? {}
+              : { allowCollaborator: command.payload.allowCollaborator }),
+            ...(command.payload.toolNetwork === undefined
+              ? {}
+              : { toolNetwork: command.payload.toolNetwork }),
+            ...(command.payload.maxRunMs === undefined
+              ? {}
+              : { maxRunMs: command.payload.maxRunMs }),
+            ...(command.payload.collaborationRoundBudget === undefined
+              ? {}
+              : { collaborationRoundBudget: command.payload.collaborationRoundBudget })
+          });
+        }
+        return { data: result.value, replayed: result.replayed };
+      }
+    },
+    "task.approveScope": {
+      type: "task.approveScope",
+      handle: async (command, context) => {
+        const result = await services.taskService.decideScopeResult({
+          ...command.payload,
+          workerGeneration: context.workerGeneration,
+          idempotencyKey: context.idempotencyKey
+        });
+        return { data: result.value, replayed: result.replayed };
+      }
+    },
+    "task.grantAdditionalRound": {
+      type: "task.grantAdditionalRound",
+      handle: async (command, context) => {
+        const result = await services.taskService.grantAdditionalRoundsResult({
+          ...command.payload,
+          workerGeneration: context.workerGeneration,
+          idempotencyKey: context.idempotencyKey
+        });
         return { data: result.value, replayed: result.replayed };
       }
     },
@@ -124,6 +180,8 @@ export function createCommandHandlers(
     handlers["project.addExisting"],
     handlers["room.create"],
     handlers["message.post"],
+    handlers["task.approveScope"],
+    handlers["task.grantAdditionalRound"],
     handlers["worker.prepareQuit"]
   ];
 }

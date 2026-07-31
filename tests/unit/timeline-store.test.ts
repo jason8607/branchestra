@@ -5,7 +5,8 @@ import type {
   Project,
   Room,
   RoomEvent,
-  RoomEventPage
+  RoomEventPage,
+  UserMessageRoomEvent
 } from "../../src/shared/contracts/domain";
 import type { BranchestraApi } from "../../src/shared/contracts/renderer-api";
 import type {
@@ -43,7 +44,7 @@ function foundationSnapshot(latestRoomSeq = 0): AppSnapshot {
   };
 }
 
-function messageEvent(roomSeq: number, options: Partial<RoomEvent> = {}): RoomEvent {
+function messageEvent(roomSeq: number, options: Partial<UserMessageRoomEvent> = {}): UserMessageRoomEvent {
   const suffix = String(roomSeq).padStart(12, "0");
   const eventId = `30000000-0000-4000-8000-${suffix}`;
   return {
