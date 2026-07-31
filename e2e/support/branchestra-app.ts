@@ -9,6 +9,8 @@ export interface LaunchBranchestraE2EOptions {
   scenario: E2EScenario;
   repositoryRoot: string;
   userDataDir?: string;
+  providerPaths?: Partial<Record<"claude" | "codex", string>>;
+  executablePath?: string;
 }
 
 export interface BranchestraE2EApp {
@@ -17,6 +19,8 @@ export interface BranchestraE2EApp {
   chooseRepository(): Promise<void>;
   readManagedWorktreeFile(relativePath: string): string;
   managedBranchExists(): Promise<boolean>;
+  windowCount(): number;
+  crashWorkerForTest(): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -45,11 +49,15 @@ export async function launchBranchestraE2E(
     BRANCHESTRA_E2E_PROJECT_PATH: options.repositoryRoot,
     BRANCHESTRA_E2E_MOCK_SCENARIO: options.scenario
   };
+  if (options.providerPaths?.claude) environment.BRANCHESTRA_E2E_CLAUDE_PATH = options.providerPaths.claude;
+  if (options.providerPaths?.codex) environment.BRANCHESTRA_E2E_CODEX_PATH = options.providerPaths.codex;
   for (const name of ["PATH", "TMPDIR", "LANG", "LC_ALL"] as const) {
     const value = process.env[name];
     if (value !== undefined) environment[name] = value;
   }
-  const app = await _electron.launch({ args: [process.cwd()], env: environment });
+  const app = options.executablePath
+    ? await _electron.launch({ executablePath: options.executablePath, env: environment })
+    : await _electron.launch({ args: [process.cwd()], env: environment });
   return {
     userDataDir,
     firstWindow: () => app.firstWindow(),
@@ -72,6 +80,16 @@ export async function launchBranchestraE2E(
           });
         }));
       return stdout.trim().length > 0;
+    },
+    windowCount: () => app.windows().length,
+    async crashWorkerForTest() {
+      await app.evaluate(() => {
+        const controls = (globalThis as typeof globalThis & {
+          __branchestraE2E?: { crashWorker(): void };
+        }).__branchestraE2E;
+        if (!controls) throw new Error("Packaged E2E controls are unavailable");
+        controls.crashWorker();
+      });
     },
     close: () => app.close()
   };

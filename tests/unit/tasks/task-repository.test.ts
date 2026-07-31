@@ -257,4 +257,33 @@ describe("TaskRepository", () => {
     expect(current.repositories.approvals.listForTask(current.records.task.id))
       .toEqual([current.records.scopeApproval]);
   });
+
+  it("drops stale pending sensitive requests but preserves task-scope requests", () => {
+    const current = setup();
+    current.repositories.tasks.insert(current.records.task);
+    const finalRequest = {
+      id: "final-request-old-generation",
+      taskId: current.records.task.id,
+      kind: "final_merge" as const,
+      scope: {
+        targetRef: current.records.task.targetRef,
+        baseOid: current.records.task.baseOid,
+        candidateOid: "b".repeat(40),
+        diffHash: `sha256:${"c".repeat(64)}` as const,
+        testSetHash: `sha256:${"d".repeat(64)}` as const
+      },
+      scopeHash: `sha256:${"e".repeat(64)}` as const,
+      requestedGeneration: "generation-1",
+      status: "pending" as const,
+      requestedAt: current.records.task.createdAt
+    };
+    current.repositories.approvals.insertRequest(current.records.scopeApprovalRequest);
+    current.repositories.approvals.insertRequest(finalRequest);
+
+    current.repositories.approvals.invalidateSensitiveFromOlderGeneration("generation-2");
+
+    expect(current.repositories.approvals.getRequest(finalRequest.id)).toBeNull();
+    expect(current.repositories.approvals.getRequest(current.records.scopeApprovalRequest.id))
+      .toEqual(current.records.scopeApprovalRequest);
+  });
 });

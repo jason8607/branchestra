@@ -60,6 +60,12 @@ export interface RunnerBackedAdapterDependencies {
 
 interface ActiveRun { runner: RunnerHandle; queue: AsyncEventQueue<TaskProviderEvent>; settle(result: TaskProviderRunResult): void }
 
+function runnerContextHash(value: string): string {
+  const hash = value.startsWith("sha256:") ? value.slice("sha256:".length) : value;
+  if (!/^[a-f0-9]{64}$/.test(hash)) throw new Error("PROVIDER_CONTEXT_HASH_INVALID");
+  return hash;
+}
+
 export class RunnerBackedAdapter implements ProviderAdapter {
   readonly provider: ProviderId;
   private readonly active = new Map<string, ActiveRun>();
@@ -109,9 +115,12 @@ export class RunnerBackedAdapter implements ProviderAdapter {
     if (this.active.has(request.runId)) throw new Error(`PROVIDER_RUN_ALREADY_ACTIVE:${request.runId}`);
     const health = await this.detect();
     if (health.state !== "ready" || !health.executableRealpath) throw new Error(`PROVIDER_NOT_READY:${this.provider}:${health.state}`);
+    const contextHash = runnerContextHash(request.contextHash);
     const environment = this.deps.environmentFor?.(health, request) ?? { HOME: process.env.HOME ?? "/", PATH: "/usr/bin:/bin", LANG: "C.UTF-8", LC_ALL: "C.UTF-8" };
     const queue = new AsyncEventQueue<TaskProviderEvent>();
     const completion = Promise.withResolvers<TaskProviderRunResult>();
+    const sessionStarted = Promise.withResolvers<string>();
+    let observedSessionId = providerSessionId;
     let settled = false;
     let runner: RunnerHandle | null = null;
     const settle = (result: TaskProviderRunResult): void => {
@@ -135,11 +144,13 @@ export class RunnerBackedAdapter implements ProviderAdapter {
         if (inserted === false) return;
         for (const event of this.normalizeEvent(message.payload, { runId: message.runId, providerSeq: message.providerSeq, occurredAt: message.receivedAt })) {
           if (event.type === "session.started") {
+            observedSessionId = event.sessionId;
+            sessionStarted.resolve(event.sessionId);
             this.deps.repository?.upsertSession({
               runId: request.runId,
               provider: this.provider,
               providerSessionId: event.sessionId,
-              contextHash: request.contextHash,
+              contextHash,
               lastProviderSeq: event.providerSeq,
               resumeState: "active",
               updatedAt: event.occurredAt,
@@ -171,12 +182,12 @@ export class RunnerBackedAdapter implements ProviderAdapter {
     this.active.set(request.runId, { runner, queue, settle });
     const payload: ProviderRunPayload = {
       taskId: request.taskId,
-      roomId: request.taskId,
+      roomId: request.roomId,
       role: request.role === "lead" ? "lead" : "collaborator",
       instruction: "recoveryBrief" in request ? `${request.recoveryBrief}\n\n${request.instruction}` : request.instruction,
       worktreePath: request.worktreePath,
       contextVersion: request.contextVersion,
-      contextHash: request.contextHash,
+      contextHash,
       approvedCapabilities: request.approvedCapabilities,
       deniedWriteRoots: [],
       environment,
@@ -185,8 +196,33 @@ export class RunnerBackedAdapter implements ProviderAdapter {
     const command: ProviderRunnerCommand = providerSessionId
       ? { type: "run.resume", runId: request.runId, provider: this.provider, executableRealpath: health.executableRealpath, codexConfigLockRealpath, providerSessionId, request: payload }
       : { type: "run.start", runId: request.runId, provider: this.provider, executableRealpath: health.executableRealpath, codexConfigLockRealpath, request: payload };
-    await runner.send(command);
-    return { runId: request.runId, sessionId: providerSessionId, events: queue, completion: completion.promise };
+    try {
+      await runner.send(command);
+      if (observedSessionId === null) {
+        const timeout = Promise.withResolvers<never>();
+        const timer = setTimeout(
+          () => timeout.reject(new Error(`PROVIDER_SESSION_START_TIMEOUT:${this.provider}`)),
+          Math.max(1, Math.min(request.approvedCapabilities.maxRunMs, 5_000))
+        );
+        void completion.promise.then(() => {
+          timeout.reject(new Error(`PROVIDER_SESSION_MISSING:${this.provider}`));
+        });
+        try {
+          observedSessionId = await Promise.race([sessionStarted.promise, timeout.promise]);
+        } finally {
+          clearTimeout(timer);
+        }
+      }
+    } catch (error) {
+      await Promise.resolve(runner.cancel?.("timeout")).catch(() => undefined);
+      settle({
+        outcome: "failed",
+        summary: error instanceof Error ? error.message : String(error),
+        error: { code: "provider_error", message: error instanceof Error ? error.message : String(error) }
+      });
+      throw error;
+    }
+    return { runId: request.runId, sessionId: observedSessionId, events: queue, completion: completion.promise };
   }
 }
 

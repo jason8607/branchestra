@@ -9,6 +9,7 @@ import type {
 const request: TaskProviderRunRequest = {
   runId: "run-1",
   taskId: "task-1",
+  roomId: "room-1",
   provider: "claude",
   role: "lead",
   worktreePath: "/tmp/worktree",

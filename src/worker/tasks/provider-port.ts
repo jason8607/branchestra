@@ -14,6 +14,7 @@ export interface ApprovedRunCapabilities {
 export interface TaskProviderRunRequest {
   runId: string;
   taskId: string;
+  roomId: string;
   provider: TaskProviderName;
   executableRealpath?: string;
   role: TaskProviderRole;

@@ -19,6 +19,7 @@ export interface TaskExecutionServicesOptions {
   workerGeneration: string;
   contextVersion: number;
   contextHash: `sha256:${string}`;
+  prepareContext?: NonNullable<import("./task-engine").TaskEngineOptions["prepareContext"]>;
   id(): string;
   now(): string;
   publish?(event: RoomEvent): void | Promise<void>;
@@ -43,6 +44,7 @@ export function createTaskExecutionServices(
     workerGeneration: options.workerGeneration,
     contextVersion: options.contextVersion,
     contextHash: options.contextHash,
+    ...(options.prepareContext ? { prepareContext: options.prepareContext } : {}),
     id: options.id,
     now: options.now,
     ...(options.publish ? { publish: options.publish } : {})

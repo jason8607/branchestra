@@ -1,6 +1,5 @@
 import type { FinalApprovalService } from "../approvals/final-approval-service";
 import type { GitArtifactRepository } from "../git/git-artifact-repository";
-import type { GitManager } from "../git/git-manager";
 import type { E2EMockScenario } from "../providers/e2e-mock-scenarios";
 import type { CollaborationCoordinator } from "./collaboration-coordinator";
 import type { CandidateService } from "./candidate-service";
@@ -10,15 +9,13 @@ import type { TaskRepository } from "./task-repository";
 export class E2EMockWorkflow {
   constructor(private readonly options: {
     scenario: E2EMockScenario;
-    engine: Pick<TaskEngine, "startApprovedTask">;
+    engine: Pick<TaskEngine, "startApprovedTask" | "runLeadRevision">;
     collaboration: Pick<CollaborationCoordinator, "requestRound" | "completeReview">;
     candidates: Pick<CandidateService, "buildVerifiedCandidate">;
     finalApproval: Pick<FinalApprovalService, "request">;
     tasks: Pick<TaskRepository, "getRequired">;
     artifacts: Pick<GitArtifactRepository, "getWorktree" | "listCheckpoints">;
-    manager: Pick<GitManager, "createCheckpoint">;
     workerGeneration: string;
-    id(): string;
     invalidate(): void;
   }) {}
 
@@ -39,19 +36,10 @@ export class E2EMockWorkflow {
         idempotencyKey: `${idempotencyKey}:review-1`
       });
 
-      const task = this.options.tasks.getRequired(taskId);
-      const lead = this.options.artifacts.getWorktree(taskId, "lead");
-      if (!lead) throw new Error("LEAD_WORKTREE_NOT_FOUND");
-      await this.options.manager.createCheckpoint({
-        projectId: task.projectId,
+      await this.options.engine.runLeadRevision({
         taskId,
-        worktree: lead,
-        authorProvider: task.leadProvider,
-        purpose: "revision",
-        message: "Address review",
-        checkpointId: this.options.id(),
-        workerGeneration: this.options.workerGeneration,
-        idempotencyKey: `${idempotencyKey}:revision-checkpoint`
+        findings: ["Confirm shared greeting"],
+        idempotencyKey: `${idempotencyKey}:revision-run`
       });
       await this.options.collaboration.requestRound({
         taskId,
@@ -64,6 +52,8 @@ export class E2EMockWorkflow {
         idempotencyKey: `${idempotencyKey}:review-2`
       });
 
+      const lead = this.options.artifacts.getWorktree(taskId, "lead");
+      if (!lead) throw new Error("LEAD_WORKTREE_NOT_FOUND");
       const checkpoint = this.options.artifacts.listCheckpoints(taskId)
         .filter(({ worktreeId }) => worktreeId === lead.id)
         .at(-1);

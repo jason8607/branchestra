@@ -187,6 +187,8 @@ export class ApprovalRepository {
         this.db.prepare("DELETE FROM approvals WHERE survives_worker_restart = 0 AND worker_generation <> ?")
           .run(currentGeneration);
       }
+      this.db.prepare("DELETE FROM approval_requests WHERE status = 'pending' AND kind <> 'task_scope' AND requested_generation <> ?")
+        .run(currentGeneration);
       return rows.map((row) => row.id);
     });
   }

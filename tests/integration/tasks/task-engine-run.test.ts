@@ -5,6 +5,51 @@ import { describe, expect, it } from "vitest";
 import { createTaskEngineFixture } from "../../fixtures/task-engine";
 
 describe("TaskEngine run", () => {
+  it("runs an approved lead revision through the provider and checkpoints it", async () => {
+    const fixture = await createTaskEngineFixture({
+      initialState: "Revision",
+      mockScript: [
+        { type: "workspace.writeText", relativePath: "revision.txt", contents: "revised\n" },
+        { type: "run.completed", summary: "review addressed" }
+      ]
+    });
+    try {
+      const lead = await fixture.prepareLead("prepare-revision-lead");
+      await fixture.repository.writeAt(lead.pathRealpath, "initial.txt", "initial\n");
+      await fixture.manager.createCheckpoint({
+        projectId: fixture.project.id,
+        taskId: "task-1",
+        worktree: lead,
+        authorProvider: "claude",
+        purpose: "implementation",
+        message: "Initial implementation",
+        checkpointId: "initial-checkpoint",
+        workerGeneration: fixture.generation,
+        idempotencyKey: "initial-checkpoint"
+      });
+
+      const result = await fixture.engine.runLeadRevision({
+        taskId: "task-1",
+        findings: ["address the review"],
+        idempotencyKey: "revision-run"
+      });
+
+      expect(result.state).toBe("Revision");
+      await expect(fixture.readLeadFile("revision.txt")).resolves.toBe("revised\n");
+      expect(fixture.artifacts.listCheckpoints("task-1").at(-1)).toMatchObject({
+        authorProvider: "claude",
+        purpose: "revision"
+      });
+      expect(fixture.providerRequests().at(-1)).toMatchObject({
+        provider: "claude",
+        role: "lead",
+        checkpointOid: expect.any(String)
+      });
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   it("prepares an approved Lead worktree, durably records events before publish, writes through the approved workspace, and checkpoints", async () => {
     const fixture = await createTaskEngineFixture({
       mockScript: [

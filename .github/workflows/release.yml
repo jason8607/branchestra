@@ -9,8 +9,8 @@ jobs:
     strategy:
       matrix:
         include:
-          - { arch: arm64, runner: macos-15 }
-          - { arch: x64, runner: macos-15-intel }
+          - { arch: arm64, runner: macos-15, app_path: release/mac-arm64/Branchestra.app }
+          - { arch: x64, runner: macos-15-intel, app_path: release/mac/Branchestra.app }
     runs-on: ${{ matrix.runner }}
     environment: release
     steps:
@@ -31,7 +31,7 @@ jobs:
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-      - run: pnpm verify:mac -- release/mac-${{ matrix.arch }}/Branchestra.app ${{ matrix.arch }}
+      - run: pnpm verify:mac -- ${{ matrix.app_path }} ${{ matrix.arch }}
       - uses: actions/upload-artifact@v4
         with:
           name: mac-${{ matrix.arch }}

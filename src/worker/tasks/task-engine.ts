@@ -33,6 +33,18 @@ export interface TaskEngineOptions {
   workerGeneration: string;
   contextVersion: number;
   contextHash: `sha256:${string}`;
+  prepareContext?(input: {
+    runId: string;
+    task: TaskRecord;
+    role: "lead" | "collaborator";
+    instruction: string;
+    checkpointOid: string | null;
+  }): Promise<{
+    version: number;
+    hash: `sha256:${string}`;
+    instruction: string;
+    persist?(): void | Promise<void>;
+  }>;
   id(): string;
   now(): string;
   publish?(event: RoomEvent): void | Promise<void>;
@@ -158,6 +170,210 @@ export class TaskEngine {
     }
   }
 
+  async runLeadRevision(input: {
+    taskId: string;
+    findings: string[];
+    idempotencyKey: string;
+  }): Promise<TaskRecord> {
+    const requestType = "task.runLeadRevision";
+    const requestHash = hashCanonical({ taskId: input.taskId, findings: input.findings });
+    const tasks = this.options.repositories.tasks;
+    const replay = tasks.replayEngineCommand(input.idempotencyKey, requestType, requestHash);
+    if (replay) return replay;
+    const task = tasks.getRequired(input.taskId);
+    if (task.state !== "Revision") throw new Error(`TASK_NOT_IN_REVISION:${task.state}`);
+    const receipt = this.approvedScope(task);
+    const project = this.options.repositories.projects.findById(task.projectId);
+    if (!project) throw new Error(`PROJECT_NOT_FOUND:${task.projectId}`);
+    const worktree = this.options.artifacts.getWorktree(task.id, "lead");
+    if (!worktree || worktree.currentCheckpointOid === null) {
+      throw new Error("LEAD_CHECKPOINT_REQUIRED");
+    }
+
+    const runId = this.options.id();
+    const revisionInstruction = JSON.stringify({
+      task: task.requestText,
+      purpose: "revision",
+      findings: input.findings,
+      checkpointOid: worktree.currentCheckpointOid
+    });
+    const context = await this.prepareContext({
+      runId,
+      task,
+      role: "lead",
+      instruction: revisionInstruction,
+      checkpointOid: worktree.currentCheckpointOid
+    });
+    tasks.beginEngineCommand({
+      idempotencyKey: input.idempotencyKey,
+      requestType,
+      requestHash,
+      workerGeneration: this.options.workerGeneration,
+      createdAt: this.options.now()
+    });
+    const lifecycle = this.createRunLifecycle(task.id);
+    const run: AgentRunRecord = {
+      id: runId,
+      taskId: task.id,
+      provider: task.leadProvider,
+      role: "lead",
+      providerSessionId: null,
+      contextVersion: context.version,
+      contextHash: context.hash,
+      state: "starting",
+      startedAt: this.options.now(),
+      finishedAt: null
+    };
+    tasks.insertRun(run);
+    await context.persist?.();
+    let handle: TaskProviderRunHandle | null = null;
+    let closeConsumer = () => {};
+    const deadline = setTimeout(() => {
+      void this.cancel(task.id, "timeout", `${run.id}:deadline`).catch(() => undefined);
+    }, receipt.scope.maxRunMs);
+    try {
+      const handlePromise = this.options.provider.startRun({
+        runId: run.id,
+        taskId: task.id,
+        roomId: task.roomId,
+        provider: task.leadProvider,
+        role: "lead",
+        worktreePath: worktree.pathRealpath,
+        instruction: context.instruction,
+        contextVersion: run.contextVersion,
+        contextHash: run.contextHash,
+        checkpointOid: worktree.currentCheckpointOid,
+        approvedCapabilities: {
+          workspaceRootRealpath: worktree.pathRealpath,
+          readableRootsRealpath: [project.repositoryRoot, worktree.pathRealpath],
+          commandClasses: receipt.scope.commandClasses,
+          toolNetwork: receipt.scope.toolNetwork,
+          allowCollaborator: false,
+          maxRunMs: receipt.scope.maxRunMs
+        }
+      });
+      this.pendingRuns.set(task.id, { runId: run.id, handle: handlePromise, receipt });
+      const started = await this.raceRunLifecycle(handlePromise, lifecycle);
+      if (started.kind === "terminal") {
+        this.pendingRuns.delete(task.id);
+        lifecycle.settleConsumer();
+        void handlePromise.then(
+          (lateHandle) => this.retireProviderHandle(lateHandle),
+          () => undefined
+        );
+        return started.task;
+      }
+      handle = started.value;
+      this.pendingRuns.delete(task.id);
+      if (tasks.getRequired(task.id).state !== "Revision") {
+        this.retireProviderHandle(handle);
+        lifecycle.settleConsumer();
+        return tasks.getRequired(task.id);
+      }
+      tasks.updateRunSession(run.id, handle.sessionId, "running");
+      const iterator = handle.events[Symbol.asyncIterator]();
+      closeConsumer = this.consumerCloser(iterator);
+      this.activeRuns.set(task.id, { handle, receipt, closeConsumer });
+      const workspace = await this.approvedWorkspace(task, worktree, project.gitCommonDir);
+      let terminalEvent: Extract<TaskProviderEvent,
+        { type: "run.completed" | "run.failed" }> | null = null;
+      while (true) {
+        const emitted = await this.raceRunLifecycle(iterator.next(), lifecycle);
+        if (emitted.kind === "terminal") {
+          closeConsumer();
+          lifecycle.settleConsumer();
+          return emitted.task;
+        }
+        if (emitted.value.done) break;
+        const event = emitted.value.value;
+        const durableTask = tasks.getRequired(task.id);
+        if (durableTask.state !== "Revision" && durableTask.state !== "CancelRequested") {
+          closeConsumer();
+          lifecycle.settleConsumer();
+          return durableTask;
+        }
+        await this.recordProviderEvent(task, tasks.getRun(run.id) ?? run, event);
+        if (event.type === "workspace.writeText") {
+          await workspace.writeText(event.relativePath, event.contents);
+        } else if (event.type === "test.request"
+          && !receipt.scope.commandClasses.includes("test")) {
+          throw new Error(`TEST_COMMAND_NOT_APPROVED:${event.commandId}`);
+        } else if (event.type === "collaborator.request") {
+          throw new Error("NESTED_COLLABORATOR_REQUEST_FORBIDDEN");
+        } else if (event.type === "run.completed" || event.type === "run.failed") {
+          terminalEvent = event;
+          closeConsumer();
+          break;
+        }
+      }
+      lifecycle.settleConsumer();
+      const settled = await this.raceRunLifecycle(handle.completion, lifecycle);
+      if (settled.kind === "terminal") return settled.task;
+      const current = tasks.getRequired(task.id);
+      if (current.state === "CancelRequested") {
+        return await this.cancellationSettlements.get(task.id) ?? current;
+      }
+      if (current.state !== "Revision") return current;
+      if (settled.value.outcome === "failed" || terminalEvent?.type === "run.failed") {
+        const failure = settled.value.error ?? (terminalEvent?.type === "run.failed"
+          ? { code: terminalEvent.code, message: terminalEvent.message }
+          : { code: "PROVIDER_FAILED", message: settled.value.summary });
+        tasks.updateRunState(run.id, "failed", this.options.now());
+        const failed = this.transition(current, { type: "fail", ...failure });
+        tasks.completeEngineCommand(input.idempotencyKey, failed, this.options.now());
+        return failed;
+      }
+      if (settled.value.outcome === "cancelled") return current;
+      tasks.updateRunState(run.id, "completed", this.options.now());
+      const checkpoint = await this.options.manager.createCheckpoint({
+        projectId: task.projectId,
+        taskId: task.id,
+        worktree,
+        authorProvider: task.leadProvider,
+        purpose: "revision",
+        message: terminalEvent?.type === "run.completed"
+          ? terminalEvent.summary
+          : settled.value.summary,
+        checkpointId: this.options.id(),
+        workerGeneration: this.options.workerGeneration,
+        idempotencyKey: `${input.idempotencyKey}:checkpoint`
+      });
+      const checkpointEvent = this.options.events.append({
+        id: this.options.id(),
+        roomId: task.roomId,
+        type: "checkpoint.created",
+        actor: "system",
+        payload: { checkpoint },
+        createdAt: this.options.now()
+      });
+      await this.options.publish?.(checkpointEvent);
+      const result = tasks.getRequired(task.id);
+      tasks.completeEngineCommand(input.idempotencyKey, result, this.options.now());
+      return result;
+    } catch (error) {
+      closeConsumer();
+      const persisted = tasks.getRun(run.id);
+      if (persisted?.state === "starting" || persisted?.state === "running") {
+        tasks.updateRunState(run.id, "failed", this.options.now());
+      }
+      if (handle) await this.options.provider.cancelRun(handle.runId, "timeout").catch(() => undefined);
+      const current = tasks.getRequired(task.id);
+      if (current.state !== "Failed" && current.state !== "Cancelled") {
+        const failed = this.transition(current, { type: "fail", ...errorDetails(error) });
+        tasks.completeEngineCommand(input.idempotencyKey, failed, this.options.now());
+        return failed;
+      }
+      throw error;
+    } finally {
+      clearTimeout(deadline);
+      this.activeRuns.delete(task.id);
+      this.pendingRuns.delete(task.id);
+      lifecycle.settleConsumer();
+      lifecycle.settle(tasks.getRequired(task.id));
+      if (this.runLifecycles.get(task.id) === lifecycle) this.runLifecycles.delete(task.id);
+    }
+  }
+
   async runCollaborationProvider(
     input: CollaborationProviderRunInput
   ): Promise<TaskRecord> {
@@ -169,20 +385,35 @@ export class TaskEngine {
     const receipt = this.approvedScope(task);
     const provider = otherProvider(task.leadProvider);
     const role = input.purpose === "review" ? "reviewer" as const : "collaborator" as const;
+    const runId = this.options.id();
+    const collaborationInstruction = JSON.stringify({
+      task: task.requestText,
+      purpose: input.purpose,
+      immutableLeadCheckpointOid: input.checkpoint.oid,
+      readOnlyGit: { diffSummary: input.diffFiles }
+    });
+    const context = await this.prepareContext({
+      runId,
+      task,
+      role: "collaborator",
+      instruction: collaborationInstruction,
+      checkpointOid: input.checkpoint.oid
+    });
     const run: AgentRunRecord = {
-      id: this.options.id(),
+      id: runId,
       taskId: task.id,
       provider,
       role,
       providerSessionId: null,
-      contextVersion: this.options.contextVersion,
-      contextHash: this.options.contextHash,
+      contextVersion: context.version,
+      contextHash: context.hash,
       state: "starting",
       startedAt: this.options.now(),
       finishedAt: null
     };
     const lifecycle = this.createRunLifecycle(task.id);
     tasks.insertRun(run);
+    await context.persist?.();
     let handle: TaskProviderRunHandle | null = null;
     let closeConsumer = () => {};
     const deadline = setTimeout(() => {
@@ -192,16 +423,11 @@ export class TaskEngine {
       const handlePromise = this.options.provider.startRun({
         runId: run.id,
         taskId: task.id,
+        roomId: task.roomId,
         provider,
         role,
         worktreePath: input.collaborator.pathRealpath,
-        instruction: JSON.stringify({
-          task: task.requestText,
-          purpose: input.purpose,
-          immutableLeadCheckpointOid: input.checkpoint.oid,
-          roomContextHash: this.options.contextHash,
-          readOnlyGit: { diffSummary: input.diffFiles }
-        }),
+        instruction: context.instruction,
         contextVersion: run.contextVersion,
         contextHash: run.contextHash,
         checkpointOid: input.checkpoint.oid,
@@ -372,26 +598,36 @@ export class TaskEngine {
       }
       task = this.transition(task, { type: "preparationSucceeded" });
       const startedAt = this.options.now();
+      const runId = this.options.id();
+      const context = await this.prepareContext({
+        runId,
+        task,
+        role: "lead",
+        instruction: task.requestText,
+        checkpointOid: worktree.currentCheckpointOid
+      });
       run = {
-        id: this.options.id(),
+        id: runId,
         taskId: task.id,
         provider: task.leadProvider,
         role: "lead",
         providerSessionId: null,
-        contextVersion: this.options.contextVersion,
-        contextHash: this.options.contextHash,
+        contextVersion: context.version,
+        contextHash: context.hash,
         state: "starting",
         startedAt,
         finishedAt: null
       };
       this.options.repositories.tasks.insertRun(run);
+      await context.persist?.();
       const handlePromise = this.options.provider.startRun({
         runId: run.id,
         taskId: task.id,
+        roomId: task.roomId,
         provider: task.leadProvider,
         role: "lead",
         worktreePath: worktree.pathRealpath,
-        instruction: task.requestText,
+        instruction: context.instruction,
         contextVersion: run.contextVersion,
         contextHash: run.contextHash,
         checkpointOid: worktree.currentCheckpointOid,
@@ -872,6 +1108,26 @@ export class TaskEngine {
       throw new Error("TASK_SCOPE_APPROVAL_INVALID");
     }
     return receipt;
+  }
+
+  private prepareContext(input: {
+    runId: string;
+    task: TaskRecord;
+    role: "lead" | "collaborator";
+    instruction: string;
+    checkpointOid: string | null;
+  }): Promise<{
+    version: number;
+    hash: `sha256:${string}`;
+    instruction: string;
+    persist?(): void | Promise<void>;
+  }> {
+    if (this.options.prepareContext) return this.options.prepareContext(input);
+    return Promise.resolve({
+      version: this.options.contextVersion,
+      hash: this.options.contextHash,
+      instruction: input.instruction
+    });
   }
 
   private transition(task: TaskRecord, action: Parameters<typeof transitionTask>[1]): TaskRecord {

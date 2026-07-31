@@ -34,7 +34,7 @@ describe("E2E Main bootstrap environment", () => {
       BRANCHESTRA_E2E: "1",
       BRANCHESTRA_E2E_USER_DATA: "/tmp/user-data",
       BRANCHESTRA_E2E_PROJECT_PATH: "/tmp/project"
-    })).toEqual({ userDataPath: "/tmp/user-data", projectPath: "/tmp/project" });
+    })).toEqual({ userDataPath: "/tmp/user-data", projectPath: "/tmp/project", providerPaths: {} });
   });
 });
 
@@ -43,6 +43,12 @@ describe("fixed project dialog", () => {
     await expect(
       createFixedProjectDialog("/tmp/project").pickExistingProject({} as never)
     ).resolves.toBe("/tmp/project");
+  });
+
+  it("returns only explicitly configured Provider fixture paths", async () => {
+    const dialog = createFixedProjectDialog("/tmp/project", { codex: "/tmp/codex" });
+    await expect(dialog.pickProviderExecutable!({} as never, "codex")).resolves.toBe("/tmp/codex");
+    await expect(dialog.pickProviderExecutable!({} as never, "claude")).resolves.toBeNull();
   });
 
   it("rejects an empty selected path during Main bootstrap", () => {

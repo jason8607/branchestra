@@ -27,7 +27,13 @@ export function createElectronProjectDialog(): ProjectDialogAdapter {
   };
 }
 
-export function createFixedProjectDialog(selectedPath: string): ProjectDialogAdapter {
+export function createFixedProjectDialog(
+  selectedPath: string,
+  providerPaths: Partial<Record<ProviderId, string>> = {}
+): ProjectDialogAdapter {
   if (selectedPath.length === 0) throw new Error("E2E project path is empty");
-  return { pickExistingProject: async () => selectedPath, pickProviderExecutable: async () => null };
+  return {
+    pickExistingProject: async () => selectedPath,
+    pickProviderExecutable: async (_parentWindow, provider) => providerPaths[provider] ?? null
+  };
 }

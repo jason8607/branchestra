@@ -34,6 +34,7 @@ function fixture(outcome: "applied" | "not_applied" | "conflict" | "uncertain") 
     }
   });
   let observations = 0;
+  const renewedFinalApprovals: string[] = [];
   const recovery = new RecoveryCoordinator({
     tasks: repositories.tasks,
     approvals: repositories.approvals,
@@ -55,10 +56,19 @@ function fixture(outcome: "applied" | "not_applied" | "conflict" | "uncertain") 
     },
     events: createEventStore(testDb.db, repositories),
     workerGeneration: "50000000-0000-4000-8000-000000000001",
+    async renewFinalApproval(taskId) {
+      renewedFinalApprovals.push(taskId);
+    },
     id: randomUUID,
     now: () => new Date().toISOString()
   });
-  return { testDb, repositories, recovery, observations: () => observations };
+  return {
+    testDb,
+    repositories,
+    recovery,
+    observations: () => observations,
+    renewedFinalApprovals
+  };
 }
 
 describe("task restart recovery", () => {
@@ -82,6 +92,9 @@ describe("task restart recovery", () => {
         idempotencyKey: `resolve-${outcome}`
       });
       expect(current.repositories.tasks.getRequired("task-1").state).toBe(expectedState);
+      expect(current.renewedFinalApprovals).toEqual(
+        expectedState === "HumanApproval" ? ["task-1"] : []
+      );
       expect(current.observations()).toBe(2);
     } finally {
       current.testDb.db.close();

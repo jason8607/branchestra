@@ -16,6 +16,8 @@ import { installNavigationPolicy } from "./security/navigation-policy";
 import { electronUtilityProcessAdapter } from "./worker/utility-process-adapter";
 import { installE2EControls } from "./testing/e2e-controls";
 
+declare const __BRANCHESTRA_PACKAGED_E2E__: boolean;
+
 export interface BootstrapPaths {
   workerEntry: string;
   dbPath: string;
@@ -27,13 +29,16 @@ export interface E2EEnvironment {
   userDataPath: string;
   projectPath: string;
   mockScenario?: "two-round-success" | "interrupted-run";
+  providerPaths: Partial<Record<"claude" | "codex", string>>;
 }
 
 const e2eEnvironmentNames = [
   "BRANCHESTRA_E2E",
   "BRANCHESTRA_E2E_USER_DATA",
   "BRANCHESTRA_E2E_PROJECT_PATH",
-  "BRANCHESTRA_E2E_MOCK_SCENARIO"
+  "BRANCHESTRA_E2E_MOCK_SCENARIO",
+  "BRANCHESTRA_E2E_CLAUDE_PATH",
+  "BRANCHESTRA_E2E_CODEX_PATH"
 ] as const;
 
 export function resolveE2EEnvironment(
@@ -57,6 +62,14 @@ export function resolveE2EEnvironment(
   return {
     userDataPath,
     projectPath,
+    providerPaths: {
+      ...(environment.BRANCHESTRA_E2E_CLAUDE_PATH
+        ? { claude: environment.BRANCHESTRA_E2E_CLAUDE_PATH }
+        : {}),
+      ...(environment.BRANCHESTRA_E2E_CODEX_PATH
+        ? { codex: environment.BRANCHESTRA_E2E_CODEX_PATH }
+        : {})
+    },
     ...(scenario ? { mockScenario: scenario } : {})
   };
 }
@@ -78,11 +91,11 @@ export function bootstrapMain(): void {
   if (e2eEnvironment === null) {
     projectDialog = createElectronProjectDialog();
   } else {
-    if (app.isPackaged && e2eEnvironment.mockScenario !== undefined) {
+    if (app.isPackaged && e2eEnvironment.mockScenario !== undefined && !__BRANCHESTRA_PACKAGED_E2E__) {
       throw new Error("MOCK_PROVIDER_DISABLED");
     }
     app.setPath("userData", e2eEnvironment.userDataPath);
-    projectDialog = createFixedProjectDialog(e2eEnvironment.projectPath);
+    projectDialog = createFixedProjectDialog(e2eEnvironment.projectPath, e2eEnvironment.providerPaths);
   }
   const paths = resolveBootstrapPaths(import.meta.url, app.getPath("userData"));
   const supervisor = createWorkerSupervisor({

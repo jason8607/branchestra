@@ -32,6 +32,7 @@ interface RecoveryCoordinatorOptions {
   reconciler: Pick<GitOperationReconciler, "observe">;
   events: EventStore;
   workerGeneration: string;
+  renewFinalApproval?(taskId: string, idempotencyKey: string): Promise<void>;
   id(): string;
   now(): string;
 }
@@ -175,6 +176,12 @@ export class RecoveryCoordinator {
       ),
       this.options.id()
     );
+    if (resolved.state === "HumanApproval") {
+      await this.options.renewFinalApproval?.(
+        resolved.id,
+        `${input.idempotencyKey}:renew-final-approval`
+      );
+    }
     this.previews.delete(input.taskId);
     return resolved;
   }

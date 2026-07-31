@@ -27,3 +27,6 @@ jobs:
       - run: pnpm test:security
       - run: pnpm build
       - run: pnpm playwright test
+      - run: pnpm test:e2e:packaged
+      - run: pnpm verify:release-policy
+      - run: pnpm licenses:check

@@ -35,6 +35,7 @@ import type {
   TaskProviderRunRequest
 } from "../../src/worker/tasks/provider-port";
 import { TaskEngine } from "../../src/worker/tasks/task-engine";
+import type { TaskEngineOptions } from "../../src/worker/tasks/task-engine";
 import { CandidateService } from "../../src/worker/tasks/candidate-service";
 import { TaskService } from "../../src/worker/tasks/task-service";
 import { transitionTask } from "../../src/worker/tasks/task-state-machine";
@@ -159,6 +160,7 @@ export interface TaskEngineFixtureOptions {
   allowCollaborator?: boolean;
   maxRunMs?: number;
   providerOverride?: TaskProviderPort;
+  prepareContext?: NonNullable<TaskEngineOptions["prepareContext"]>;
   publishOverride?: (event: RoomEvent) => void | Promise<void>;
 }
 
@@ -261,6 +263,7 @@ export async function createTaskEngineFixture(options: TaskEngineFixtureOptions)
     workerGeneration: base.generation,
     contextVersion: 1,
     contextHash: `sha256:${"1".repeat(64)}`,
+    ...(options.prepareContext ? { prepareContext: options.prepareContext } : {}),
     id,
     now: base.now,
     async publish(event) {

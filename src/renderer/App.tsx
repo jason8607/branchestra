@@ -12,7 +12,7 @@ export function App({ store }: { store: TimelineStore }): React.JSX.Element {
   const taskInspector = useTaskInspector(window.branchestra, state.selectedTaskId);
 
   useEffect(() => {
-    void store.hydrate();
+    void store.hydrate().then(() => store.refreshProviderHealth()).catch(() => undefined);
     return () => store.dispose();
   }, [store]);
 
@@ -34,12 +34,13 @@ export function App({ store }: { store: TimelineStore }): React.JSX.Element {
           <h1>Shared Timeline</h1>
           {state.error ? <p className="connection-error" role="alert">{state.error}</p> : null}
         </header>
-        {state.snapshot.projects.length === 0 ? <ProviderHealthStep
-          health={state.providerHealth}
-          onPick={(provider) => void store.pickProviderExecutable(provider)}
-          onRefresh={() => void store.refreshProviderHealth()}
-        /> : null}
-        <Timeline events={events} onSelectTask={(taskId) => store.selectTask(taskId)} />
+        {state.snapshot.projects.length === 0
+          ? <section className="timeline"><ProviderHealthStep
+              health={state.providerHealth}
+              onPick={(provider) => void store.pickProviderExecutable(provider)}
+              onRefresh={() => void store.refreshProviderHealth()}
+            /></section>
+          : <Timeline events={events} onSelectTask={(taskId) => store.selectTask(taskId)} />}
         <Composer
           disabled={!room || state.connection !== "ready"}
           onSend={(body) => room ? store.postMessage(room.id, body) : Promise.resolve()}

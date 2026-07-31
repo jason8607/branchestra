@@ -63,6 +63,7 @@ describe("production task execution composition", () => {
       await expect(provider.startRun({
         runId: "run-unavailable",
         taskId: "task-1",
+        roomId: fixture.room.id,
         provider: "claude",
         role: "lead",
         worktreePath: fixture.project.repositoryRoot,

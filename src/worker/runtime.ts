@@ -45,6 +45,10 @@ import { CLAUDE_CAPABILITIES } from "../provider-runner/claude-runtime";
 import { CODEX_CAPABILITIES } from "../provider-runner/codex-runtime";
 import { ReadOnlyToolService } from "./tools/read-only-tool-service";
 import { ToolBridge } from "./tools/tool-bridge";
+import { ContextBuilder } from "./context/context-builder";
+import { ContextRepository } from "./context/context-repository";
+import { RuntimeContextSource } from "./context/runtime-context-source";
+import { createTaskRunContextPreparer } from "./context/task-run-context";
 import { MockProvider } from "./providers/mock-provider";
 import { e2eMockScript, type E2EMockScenario } from "./providers/e2e-mock-scenarios";
 import { createCommandHandlers } from "./protocol/handlers";
@@ -254,6 +258,14 @@ export async function startWorker(options: WorkerStartOptions): Promise<WorkerRu
       now: clock.now
     });
     const artifacts = new GitArtifactRepository(database);
+    const prepareContext = createTaskRunContextPreparer({
+      builder: new ContextBuilder(new RuntimeContextSource(database, artifacts)),
+      repository: new ContextRepository(repositories.providers, clock.now),
+      approvedScope(task) {
+        if (!task.scopeApprovalId) throw new Error("TASK_SCOPE_APPROVAL_REQUIRED");
+        return repositories.approvals.getRequired(task.scopeApprovalId).scope;
+      }
+    });
     const operations = new JournaledOperationRunner(repositories.operations);
     const manager = new GitManager({
       git,
@@ -411,6 +423,7 @@ export async function startWorker(options: WorkerStartOptions): Promise<WorkerRu
         source: "worker-runtime",
         workerGeneration: options.identity.workerGeneration
       }),
+      prepareContext,
       id: ids.next,
       now: clock.now,
       publish: publishRoomEvent
@@ -481,6 +494,9 @@ export async function startWorker(options: WorkerStartOptions): Promise<WorkerRu
       reconciler: new GitOperationReconciler({ projects: repositories.projects, git }),
       events: eventStore,
       workerGeneration: options.identity.workerGeneration,
+      async renewFinalApproval(taskId, idempotencyKey) {
+        await finalApproval.request(taskId, idempotencyKey);
+      },
       id: ids.next,
       now: clock.now
     });
@@ -511,9 +527,7 @@ export async function startWorker(options: WorkerStartOptions): Promise<WorkerRu
           finalApproval,
           tasks: repositories.tasks,
           artifacts,
-          manager,
           workerGeneration: options.identity.workerGeneration,
-          id: ids.next,
           invalidate: invalidateState
         })
       : undefined;
