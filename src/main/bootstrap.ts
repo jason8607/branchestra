@@ -95,7 +95,11 @@ export function bootstrapMain(): void {
       throw new Error("MOCK_PROVIDER_DISABLED");
     }
     app.setPath("userData", e2eEnvironment.userDataPath);
-    projectDialog = createFixedProjectDialog(e2eEnvironment.projectPath, e2eEnvironment.providerPaths);
+    projectDialog = createFixedProjectDialog(
+      e2eEnvironment.projectPath,
+      e2eEnvironment.providerPaths,
+      join(e2eEnvironment.userDataPath, "branchestra-diagnostics.json.gz")
+    );
   }
   const paths = resolveBootstrapPaths(import.meta.url, app.getPath("userData"));
   const supervisor = createWorkerSupervisor({

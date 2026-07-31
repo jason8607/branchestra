@@ -1,6 +1,6 @@
-import { mkdtempSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { _electron, type Page } from "@playwright/test";
 
 export type E2EScenario = "two-round-success" | "interrupted-run";
@@ -18,6 +18,8 @@ export interface BranchestraE2EApp {
   firstWindow(): Promise<Page>;
   chooseRepository(): Promise<void>;
   readManagedWorktreeFile(relativePath: string): string;
+  writeManagedWorktreeFile(anchorRelativePath: string, relativePath: string, contents: string): void;
+  readRecoveryWorktreeFile(relativePath: string): string;
   managedBranchExists(): Promise<boolean>;
   windowCount(): number;
   crashWorkerForTest(): Promise<void>;
@@ -69,6 +71,20 @@ export async function launchBranchestraE2E(
       const root = join(userDataDir, "managed-worktrees");
       const path = findFile(root, relativePath);
       if (!path) throw new Error(`Managed worktree file not found: ${relativePath}`);
+      return readFileSync(path, "utf8");
+    },
+    writeManagedWorktreeFile(anchorRelativePath, relativePath, contents) {
+      const root = join(userDataDir, "managed-worktrees");
+      const anchor = findFile(root, anchorRelativePath);
+      if (!anchor) throw new Error(`Managed worktree anchor not found: ${anchorRelativePath}`);
+      const target = join(dirname(anchor), relativePath);
+      mkdirSync(dirname(target), { recursive: true });
+      writeFileSync(target, contents, "utf8");
+    },
+    readRecoveryWorktreeFile(relativePath) {
+      const root = join(userDataDir, "recovery", "worktrees");
+      const path = findFile(root, relativePath);
+      if (!path) throw new Error(`Recovery worktree file not found: ${relativePath}`);
       return readFileSync(path, "utf8");
     },
     async managedBranchExists() {

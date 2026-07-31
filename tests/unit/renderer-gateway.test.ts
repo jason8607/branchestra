@@ -15,7 +15,7 @@ import {
 vi.mock("electron", () => ({
   app: { getPath: vi.fn(() => "/data/user") },
   BrowserWindow: vi.fn(),
-  dialog: { showOpenDialog: vi.fn() },
+  dialog: { showOpenDialog: vi.fn(), showSaveDialog: vi.fn() },
   ipcMain: { handle: vi.fn(), removeHandler: vi.fn() },
   utilityProcess: { fork: vi.fn() }
 }));
@@ -110,6 +110,8 @@ function workerResponse(request: WorkerRequestEnvelope): WorkerResponseEnvelope 
         };
       case "worker.prepareQuit":
         return { prepared: true as const };
+      case "diagnostics.exportTo":
+        return { sha256: "a".repeat(64), bytes: 512 };
     }
   })();
   return WorkerResponseEnvelopeSchema.parse({
@@ -158,7 +160,8 @@ function gatewayFixture(options: {
     ? options.activeGeneration!
     : generation;
   const dialog = {
-    pickExistingProject: vi.fn(async () => options.dialogResult ?? options.selectedPath)
+    pickExistingProject: vi.fn(async () => options.dialogResult ?? options.selectedPath),
+    pickDiagnosticDestination: vi.fn(async () => "/selected/by/main/branchestra-diagnostics.json.gz")
   };
   let eventListener: ((event: unknown) => void) | null = null;
   const unsubscribe = vi.fn();
@@ -248,6 +251,27 @@ describe("renderer gateway", () => {
       payload: { selectedPath: "/selected/by/main" }
     }));
     expect(response).toMatchObject({ payload: { ok: true, requestType: "project.pickExisting" } });
+  });
+
+  it("keeps the diagnostic destination in Main and sends only Main's selected path to Worker", async () => {
+    const fixture = gatewayFixture({ selectedPath: null, senderId: 42 });
+    registerRendererGateway(fixture.dependencies);
+
+    const response = await fixture.invoke(42, {
+      v: 1,
+      requestId: "10000000-0000-4000-8000-000000000001",
+      idempotencyKey: "diagnostics-1",
+      workerGeneration: fixture.generation,
+      type: "diagnostics.export",
+      payload: {}
+    });
+
+    expect(fixture.dialog.pickDiagnosticDestination).toHaveBeenCalledOnce();
+    expect(fixture.supervisor.request).toHaveBeenCalledWith(expect.objectContaining({
+      type: "diagnostics.exportTo",
+      payload: { destinationPath: "/selected/by/main/branchestra-diagnostics.json.gz" }
+    }));
+    expect(response).toMatchObject({ payload: { ok: true, requestType: "diagnostics.export" } });
   });
 
   it("rejects an untrusted sender without showing a dialog or dispatching", async () => {

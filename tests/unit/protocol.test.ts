@@ -23,6 +23,11 @@ describe("IPC contracts", () => {
       type: "room.create",
       payload: { projectId: "33333333-3333-4333-8333-333333333333", title: "Ideas" }
     }).type).toBe("room.create");
+    expect(RendererRequestEnvelopeSchema.parse({
+      ...metadata,
+      type: "cleanup.room.preview",
+      payload: { roomId: "33333333-3333-4333-8333-333333333333" }
+    }).type).toBe("cleanup.room.preview");
   });
 
   it("does not expose a renderer command carrying a filesystem path", () => {
@@ -30,6 +35,16 @@ describe("IPC contracts", () => {
       ...metadata,
       type: "project.addExisting",
       payload: { selectedPath: "/private/repository" }
+    })).toThrow();
+    expect(RendererRequestEnvelopeSchema.parse({
+      ...metadata,
+      type: "diagnostics.export",
+      payload: {}
+    }).type).toBe("diagnostics.export");
+    expect(() => RendererRequestEnvelopeSchema.parse({
+      ...metadata,
+      type: "diagnostics.exportTo",
+      payload: { destinationPath: "/tmp/diagnostics.json.gz" }
     })).toThrow();
   });
 

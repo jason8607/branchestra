@@ -1,8 +1,10 @@
-import { readFile } from "node:fs/promises";
+import { lstat, readFile } from "node:fs/promises";
 import type { JsonValue } from "../../shared/contracts/domain";
 import { hashBytes } from "../approvals/approved-workspace";
 import type { OperationRecord } from "../operations/operation-journal";
+import type { OperationJournal } from "../operations/operation-journal";
 import type { ProjectRepository } from "../storage/repositories";
+import type { GitArtifactRepository } from "./git-artifact-repository";
 import type { GitCommandRunner } from "./git-command-runner";
 
 export interface ReconciledOperation {
@@ -27,10 +29,21 @@ function stringField(record: Record<string, JsonValue>, ...names: string[]): str
   return null;
 }
 
+async function exists(path: string): Promise<boolean> {
+  try {
+    await lstat(path);
+    return true;
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
 export class GitOperationReconciler {
   constructor(private readonly options: {
     projects: Pick<ProjectRepository, "findById">;
     git: Pick<GitCommandRunner, "run">;
+    artifacts?: Pick<GitArtifactRepository, "markArchivedPath">;
   }) {}
 
   async observe(record: OperationRecord): Promise<ReconciledOperation> {
@@ -75,6 +88,37 @@ export class GitOperationReconciler {
       }
     }
 
+    if (record.operationType === "archive-worktree") {
+      const worktreeId = stringField(expected, "worktreeId");
+      const source = stringField(expected, "source");
+      const recoveryPath = stringField(expected, "recoveryPath");
+      if (!worktreeId || !source || !recoveryPath) {
+        return result("uncertain", { reason: "invalid_expected_state" });
+      }
+      try {
+        const sourceExists = await exists(source);
+        const recoveryPathExists = await exists(recoveryPath);
+        const actual: Record<string, JsonValue> = { source, sourceExists, recoveryPath, recoveryPathExists };
+        if (sourceExists && !recoveryPathExists) return result("not_applied", actual);
+        if (sourceExists && recoveryPathExists) return result("conflict", actual);
+        if (!sourceExists && !recoveryPathExists) return result("uncertain", actual);
+        const project = this.options.projects.findById(record.projectId);
+        if (!project) return result("uncertain", { ...actual, reason: "project_missing" });
+        const listing = (await this.options.git.run(project.repositoryRoot, ["worktree", "list", "--porcelain"])).stdout;
+        const stillRegistered = listing.split("\n").some((line) => line === `worktree ${source}`);
+        actual.stillRegistered = stillRegistered;
+        if (stillRegistered) return result("uncertain", actual);
+        this.options.artifacts?.markArchivedPath(worktreeId, source, recoveryPath);
+        return result("applied", actual);
+      } catch (error) {
+        return result("uncertain", {
+          source,
+          recoveryPath,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+
     const ref = stringField(expected, "immutableRef", "refName", "targetRef");
     const oid = stringField(expected, "candidateOid", "oid", "expectedOid");
     if (ref && oid) {
@@ -96,4 +140,19 @@ export class GitOperationReconciler {
     }
     return result("uncertain", { reason: "unsupported_operation_type" });
   }
+}
+
+export async function reconcileAppliedArchiveOperations(options: {
+  operations: Pick<OperationJournal, "listIncomplete" | "reconcile">;
+  reconciler: Pick<GitOperationReconciler, "observe">;
+}): Promise<string[]> {
+  const completed: string[] = [];
+  for (const record of options.operations.listIncomplete()) {
+    if (record.operationType !== "archive-worktree") continue;
+    const observed = await options.reconciler.observe(record);
+    if (observed.outcome !== "applied") continue;
+    options.operations.reconcile(record.id, observed.actual, observed.outcome);
+    completed.push(record.id);
+  }
+  return completed;
 }

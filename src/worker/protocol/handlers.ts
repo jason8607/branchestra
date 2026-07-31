@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { SnapshotPageSchema, type AppSnapshot, type SnapshotPage } from "../../shared/contracts/domain";
-import { MAX_IPC_BYTES, encodedEnvelopeBytes, type WorkerCommand } from "../../shared/contracts/protocol";
+import { MAX_IPC_BYTES, encodedEnvelopeBytes, type ProjectCleanupPreview, type RoomCleanupPreview, type WorktreeCleanupPreview, type WorkerCommand } from "../../shared/contracts/protocol";
 import type { ProjectService } from "../domain/project-service";
 import type { RoomService } from "../domain/room-service";
 import type { TaskService } from "../tasks/task-service";
@@ -9,6 +9,7 @@ import { parseAgentMentions } from "../tasks/mention-parser";
 import type { AnyCommandHandler, CommandHandler } from "./command-handler";
 import type { ProviderHealthService } from "../providers/provider-health-service";
 import { ProviderExecutableSelectedHandler, ProviderHealthListHandler } from "../providers/provider-command-handlers";
+import type { DurableCommand } from "../storage/idempotency-store";
 
 export interface CommandHandlerServices {
   projectService: ProjectService;
@@ -19,6 +20,22 @@ export interface CommandHandlerServices {
   taskExecutionServices?: TaskExecutionServices;
   taskCommandHandlers?: readonly AnyCommandHandler[];
   providerHealthService?: ProviderHealthService;
+  exportDiagnostics?(destinationPath: string): Promise<{ sha256: string; bytes: number }>;
+  previewRoomCleanup?(roomId: string): RoomCleanupPreview;
+  removeRoomCleanup?(
+    receipt: RoomCleanupPreview & { confirmation: string },
+    command: DurableCommand
+  ): { value: { removed: true; kind: "room"; id: string }; replayed: boolean };
+  previewWorktreeCleanup?(worktreeId: string): Promise<WorktreeCleanupPreview>;
+  archiveWorktreeCleanup?(
+    receipt: WorktreeCleanupPreview & { allowDirtyArchive: boolean },
+    idempotencyKey: string
+  ): Promise<{ recoveryPath: string }>;
+  previewProjectCleanup?(projectId: string): ProjectCleanupPreview;
+  removeProjectCleanup?(
+    receipt: ProjectCleanupPreview & { confirmation: string },
+    command: DurableCommand
+  ): { value: { removed: true; kind: "project"; id: string }; replayed: boolean };
   prepareQuit(deadlineMs: number): Promise<void>;
 }
 
@@ -179,6 +196,55 @@ export function createCommandHandlers(
         await services.prepareQuit(command.payload.deadlineMs);
         return { data: { prepared: true as const }, replayed: false };
       }
+    },
+    "diagnostics.exportTo": {
+      type: "diagnostics.exportTo",
+      handle: async (command) => ({
+        data: await services.exportDiagnostics!(command.payload.destinationPath),
+        replayed: false
+      })
+    },
+    "cleanup.room.preview": {
+      type: "cleanup.room.preview",
+      handle: (command) => ({
+        data: services.previewRoomCleanup!(command.payload.roomId),
+        replayed: false
+      })
+    },
+    "cleanup.room.remove": {
+      type: "cleanup.room.remove",
+      handle: (command, context) => {
+        const result = services.removeRoomCleanup!(command.payload, context.durable(command));
+        return { data: result.value, replayed: result.replayed };
+      }
+    },
+    "cleanup.worktree.preview": {
+      type: "cleanup.worktree.preview",
+      handle: async (command) => ({
+        data: await services.previewWorktreeCleanup!(command.payload.worktreeId),
+        replayed: false
+      })
+    },
+    "cleanup.worktree.archive": {
+      type: "cleanup.worktree.archive",
+      handle: async (command, context) => {
+        const result = await services.archiveWorktreeCleanup!(command.payload, context.idempotencyKey);
+        return { data: { archived: true as const, recoveryPath: result.recoveryPath }, replayed: false };
+      }
+    },
+    "cleanup.project.preview": {
+      type: "cleanup.project.preview",
+      handle: (command) => ({
+        data: services.previewProjectCleanup!(command.payload.projectId),
+        replayed: false
+      })
+    },
+    "cleanup.project.remove": {
+      type: "cleanup.project.remove",
+      handle: (command, context) => {
+        const result = services.removeProjectCleanup!(command.payload, context.durable(command));
+        return { data: result.value, replayed: result.replayed };
+      }
     }
   };
 
@@ -195,6 +261,19 @@ export function createCommandHandlers(
     ...(services.providerHealthService ? [
       new ProviderExecutableSelectedHandler(services.providerHealthService) as AnyCommandHandler,
       new ProviderHealthListHandler(services.providerHealthService) as AnyCommandHandler,
+    ] : []),
+    ...(services.exportDiagnostics ? [handlers["diagnostics.exportTo"]!] : []),
+    ...(services.previewRoomCleanup && services.removeRoomCleanup ? [
+      handlers["cleanup.room.preview"]!,
+      handlers["cleanup.room.remove"]!
+    ] : []),
+    ...(services.previewWorktreeCleanup && services.archiveWorktreeCleanup ? [
+      handlers["cleanup.worktree.preview"]!,
+      handlers["cleanup.worktree.archive"]!
+    ] : []),
+    ...(services.previewProjectCleanup && services.removeProjectCleanup ? [
+      handlers["cleanup.project.preview"]!,
+      handlers["cleanup.project.remove"]!
     ] : []),
     ...(services.taskCommandHandlers ?? legacyTaskHandlers),
     handlers["worker.prepareQuit"]!

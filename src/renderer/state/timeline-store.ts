@@ -10,6 +10,7 @@ import {
 } from "../../shared/contracts/domain";
 import { ProviderHealthSchema, type ProviderHealth, type ProviderId } from "../../shared/contracts/provider";
 import type { BranchestraApi } from "../../shared/contracts/renderer-api";
+import { ProjectCleanupPreviewSchema, RoomCleanupPreviewSchema, WorktreeCleanupPreviewSchema, type ProjectCleanupPreview, type RoomCleanupPreview, type WorktreeCleanupPreview } from "../../shared/contracts/protocol";
 
 export interface TimelineState {
   connection: "bootstrapping" | "ready" | "reconnecting" | "error";
@@ -33,6 +34,13 @@ export interface TimelineStore {
   pickProviderExecutable(provider: ProviderId): Promise<void>;
   createRoom(projectId: string, title: string): Promise<void>;
   postMessage(roomId: string, body: string): Promise<void>;
+  exportDiagnostics(): Promise<{ cancelled: true } | { sha256: string; bytes: number }>;
+  previewRoomCleanup(roomId: string): Promise<RoomCleanupPreview>;
+  removeRoomCleanup(receipt: RoomCleanupPreview & { confirmation: string }): Promise<void>;
+  previewWorktreeCleanup(worktreeId: string): Promise<WorktreeCleanupPreview>;
+  archiveWorktreeCleanup(receipt: WorktreeCleanupPreview & { allowDirtyArchive: boolean }): Promise<string>;
+  previewProjectCleanup(projectId: string): Promise<ProjectCleanupPreview>;
+  removeProjectCleanup(receipt: ProjectCleanupPreview & { confirmation: string }): Promise<void>;
   dispose(): void;
 }
 
@@ -595,6 +603,107 @@ export function createTimelineStore(
         });
         throw new Error(message, { cause: error });
       }
+    },
+    async exportDiagnostics() {
+      const response = await api.request({
+        type: "diagnostics.export",
+        payload: {},
+        idempotencyKey: nextId()
+      });
+      if (!response.payload.ok) throw new Error(response.payload.message);
+      const data = response.payload.data;
+      if (typeof data === "object" && data !== null && "cancelled" in data && data.cancelled === true) {
+        return { cancelled: true };
+      }
+      if (typeof data === "object" && data !== null
+        && "sha256" in data && typeof data.sha256 === "string" && /^[a-f0-9]{64}$/.test(data.sha256)
+        && "bytes" in data && typeof data.bytes === "number" && Number.isInteger(data.bytes) && data.bytes > 0) {
+        return { sha256: data.sha256, bytes: data.bytes };
+      }
+      throw new Error("Diagnostic export response is invalid");
+    },
+    async previewRoomCleanup(roomId) {
+      const response = await api.request({
+        type: "cleanup.room.preview",
+        payload: { roomId },
+        idempotencyKey: nextId()
+      });
+      if (!response.payload.ok) throw new Error(response.payload.message);
+      const parsed = RoomCleanupPreviewSchema.safeParse(response.payload.data);
+      if (!parsed.success || parsed.data.roomId !== roomId) {
+        throw new Error("Room cleanup preview is invalid");
+      }
+      return parsed.data;
+    },
+    async removeRoomCleanup(receipt) {
+      const operationEpoch = lifecycleEpoch;
+      const response = await api.request({
+        type: "cleanup.room.remove",
+        payload: receipt,
+        idempotencyKey: nextId()
+      });
+      if (!response.payload.ok) throw new Error(response.payload.message);
+      const data = response.payload.data;
+      if (typeof data !== "object" || data === null || !("removed" in data) || data.removed !== true
+        || !("kind" in data) || data.kind !== "room" || !("id" in data) || data.id !== receipt.roomId) {
+        throw new Error("Room cleanup response is invalid");
+      }
+      await forceFreshHydrate(operationEpoch);
+    },
+    async previewWorktreeCleanup(worktreeId) {
+      const response = await api.request({
+        type: "cleanup.worktree.preview",
+        payload: { worktreeId },
+        idempotencyKey: nextId()
+      });
+      if (!response.payload.ok) throw new Error(response.payload.message);
+      const parsed = WorktreeCleanupPreviewSchema.safeParse(response.payload.data);
+      if (!parsed.success || parsed.data.worktreeId !== worktreeId) {
+        throw new Error("Worktree cleanup preview is invalid");
+      }
+      return parsed.data;
+    },
+    async archiveWorktreeCleanup(receipt) {
+      const response = await api.request({
+        type: "cleanup.worktree.archive",
+        payload: receipt,
+        idempotencyKey: nextId()
+      });
+      if (!response.payload.ok) throw new Error(response.payload.message);
+      const data = response.payload.data;
+      if (typeof data !== "object" || data === null || !("archived" in data) || data.archived !== true
+        || !("recoveryPath" in data) || typeof data.recoveryPath !== "string") {
+        throw new Error("Worktree archive response is invalid");
+      }
+      return data.recoveryPath;
+    },
+    async previewProjectCleanup(projectId) {
+      const response = await api.request({
+        type: "cleanup.project.preview",
+        payload: { projectId },
+        idempotencyKey: nextId()
+      });
+      if (!response.payload.ok) throw new Error(response.payload.message);
+      const parsed = ProjectCleanupPreviewSchema.safeParse(response.payload.data);
+      if (!parsed.success || parsed.data.projectId !== projectId) {
+        throw new Error("Project cleanup preview is invalid");
+      }
+      return parsed.data;
+    },
+    async removeProjectCleanup(receipt) {
+      const operationEpoch = lifecycleEpoch;
+      const response = await api.request({
+        type: "cleanup.project.remove",
+        payload: receipt,
+        idempotencyKey: nextId()
+      });
+      if (!response.payload.ok) throw new Error(response.payload.message);
+      const data = response.payload.data;
+      if (typeof data !== "object" || data === null || !("removed" in data) || data.removed !== true
+        || !("kind" in data) || data.kind !== "project" || !("id" in data) || data.id !== receipt.projectId) {
+        throw new Error("Project cleanup response is invalid");
+      }
+      await forceFreshHydrate(operationEpoch);
     },
     dispose() {
       if (disposed) return;

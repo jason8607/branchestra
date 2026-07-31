@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "rows": [
+    {
+      "appVersion": "0.1.0",
+      "provider": "claude",
+      "sdkVersion": "0.3.216",
+      "cliVersion": "2.1.206",
+      "architecture": "arm64",
+      "authMode": "subscription",
+      "fixtureVersion": "sdk-shape-v1",
+      "profileHash": null,
+      "lastControlledSmoke": null,
+      "policyStatus": "blocked"
+    },
+    {
+      "appVersion": "0.1.0",
+      "provider": "claude",
+      "sdkVersion": "0.3.216",
+      "cliVersion": "2.1.206",
+      "architecture": "x64",
+      "authMode": "subscription",
+      "fixtureVersion": "sdk-shape-v1",
+      "profileHash": null,
+      "lastControlledSmoke": null,
+      "policyStatus": "blocked"
+    },
+    {
+      "appVersion": "0.1.0",
+      "provider": "codex",
+      "sdkVersion": "0.144.6",
+      "cliVersion": "0.144.6",
+      "architecture": "arm64",
+      "authMode": "chatgpt",
+      "fixtureVersion": "sdk-shape-v1",
+      "profileHash": null,
+      "lastControlledSmoke": null,
+      "policyStatus": "pending_evidence"
+    },
+    {
+      "appVersion": "0.1.0",
+      "provider": "codex",
+      "sdkVersion": "0.144.6",
+      "cliVersion": "0.144.6",
+      "architecture": "x64",
+      "authMode": "chatgpt",
+      "fixtureVersion": "sdk-shape-v1",
+      "profileHash": null,
+      "lastControlledSmoke": null,
+      "policyStatus": "pending_evidence"
+    }
+  ]
+}

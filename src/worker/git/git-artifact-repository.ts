@@ -156,6 +156,18 @@ export class GitArtifactRepository {
     return rows.map(mapWorktree);
   }
 
+  markArchivedPath(worktreeId: string, sourcePath: string, recoveryPath: string): void {
+    const current = this.db.prepare("SELECT path_realpath FROM worktrees WHERE id = ?")
+      .get(worktreeId) as { path_realpath: string } | undefined;
+    if (!current) throw new Error(`WORKTREE_NOT_FOUND:${worktreeId}`);
+    if (current.path_realpath === recoveryPath) return;
+    if (current.path_realpath !== sourcePath) throw new Error("WORKTREE_ARCHIVE_RECORD_STALE");
+    const updated = this.db.prepare(
+      "UPDATE worktrees SET path_realpath = ? WHERE id = ? AND path_realpath = ?"
+    ).run(recoveryPath, worktreeId, sourcePath);
+    if (updated.changes !== 1) throw new Error("WORKTREE_ARCHIVE_RECORD_STALE");
+  }
+
   updateCheckpoint(worktreeId: string, oid: string): void {
     const result = this.db.prepare("UPDATE worktrees SET current_checkpoint_oid = ? WHERE id = ?")
       .run(oid, worktreeId);

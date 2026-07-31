@@ -22,7 +22,7 @@ import { inspectExistingRepository } from "./git/inspect-repository";
 import { GitCommandRunner } from "./git/git-command-runner";
 import { GitArtifactRepository } from "./git/git-artifact-repository";
 import { GitManager } from "./git/git-manager";
-import { GitOperationReconciler } from "./git/git-operation-reconciler";
+import { GitOperationReconciler, reconcileAppliedArchiveOperations } from "./git/git-operation-reconciler";
 import { MergeService } from "./git/merge-service";
 import { GitReadService } from "./git/repository-inspector";
 import { JournaledOperationRunner } from "./operations/journaled-operation-runner";
@@ -49,6 +49,11 @@ import { ContextBuilder } from "./context/context-builder";
 import { ContextRepository } from "./context/context-repository";
 import { RuntimeContextSource } from "./context/runtime-context-source";
 import { createTaskRunContextPreparer } from "./context/task-run-context";
+import { exportDiagnosticBundle } from "./diagnostics/export-bundle";
+import { CleanupRepository } from "./cleanup/cleanup-repository";
+import { CleanupCommandService } from "./cleanup/cleanup-command-service";
+import { CleanupService } from "./cleanup/cleanup-service";
+import { RotatingLog } from "./diagnostics/rotating-log";
 import { MockProvider } from "./providers/mock-provider";
 import { e2eMockScript, type E2EMockScenario } from "./providers/e2e-mock-scenarios";
 import { createCommandHandlers } from "./protocol/handlers";
@@ -137,6 +142,22 @@ function stoppedRuntime(): WorkerRuntime {
 
 export async function startWorker(options: WorkerStartOptions): Promise<WorkerRuntime> {
   if (options.e2eMock && options.e2eMock.enabled !== true) throw new Error("MOCK_PROVIDER_DISABLED");
+  const diagnosticLog = new RotatingLog(resolve(dirname(options.dbPath), "logs", "worker.jsonl"));
+  const recentErrors: Array<{ at: string; scope: string; name: string; code: string }> = [];
+  const recordError = (scope: string, error: unknown): void => {
+    const candidateCode = error && typeof error === "object" && "code" in error
+      ? String((error as { code: unknown }).code)
+      : "UNCLASSIFIED";
+    const record = {
+      at: new Date().toISOString(),
+      scope,
+      name: error instanceof Error ? error.name : "UnknownError",
+      code: /^[A-Z0-9_]{1,80}$/.test(candidateCode) ? candidateCode : "UNCLASSIFIED"
+    };
+    recentErrors.push(record);
+    if (recentErrors.length > 50) recentErrors.shift();
+    void diagnosticLog.write(record).catch(() => undefined);
+  };
   const database = openDatabase(options.dbPath);
   let leaseHeld = false;
   const leaseStore = (() => {
@@ -258,6 +279,15 @@ export async function startWorker(options: WorkerStartOptions): Promise<WorkerRu
       now: clock.now
     });
     const artifacts = new GitArtifactRepository(database);
+    const gitOperationReconciler = new GitOperationReconciler({
+      projects: repositories.projects,
+      git,
+      artifacts
+    });
+    await reconcileAppliedArchiveOperations({
+      operations: repositories.operations,
+      reconciler: gitOperationReconciler
+    });
     const prepareContext = createTaskRunContextPreparer({
       builder: new ContextBuilder(new RuntimeContextSource(database, artifacts)),
       repository: new ContextRepository(repositories.providers, clock.now),
@@ -267,13 +297,14 @@ export async function startWorker(options: WorkerStartOptions): Promise<WorkerRu
       }
     });
     const operations = new JournaledOperationRunner(repositories.operations);
+    const repositoryLock = new RepositoryLock();
     const manager = new GitManager({
       git,
       readService: gitReadService,
       artifacts,
       projects: repositories.projects,
       tasks: repositories.tasks,
-      lock: new RepositoryLock(),
+      lock: repositoryLock,
       operations,
       journal: repositories.operations,
       managedWorktreeRoot,
@@ -491,7 +522,7 @@ export async function startWorker(options: WorkerStartOptions): Promise<WorkerRu
       operations: repositories.operations,
       artifacts,
       projects: repositories.projects,
-      reconciler: new GitOperationReconciler({ projects: repositories.projects, git }),
+      reconciler: gitOperationReconciler,
       events: eventStore,
       workerGeneration: options.identity.workerGeneration,
       async renewFinalApproval(taskId, idempotencyKey) {
@@ -531,6 +562,21 @@ export async function startWorker(options: WorkerStartOptions): Promise<WorkerRu
           invalidate: invalidateState
         })
       : undefined;
+    const cleanupCommands = new CleanupCommandService({
+      database,
+      repository: new CleanupRepository(database, clock.now),
+      idempotency: idempotencyStore
+    });
+    const cleanupService = new CleanupService({
+      database,
+      git,
+      lock: repositoryLock,
+      operations,
+      recoveryRoot: resolve(dirname(options.dbPath), "recovery", "worktrees"),
+      workerGeneration: options.identity.workerGeneration,
+      id: ids.next,
+      now: clock.now
+    });
     const taskCommandHandlers = createTaskCommandHandlers({
       workerGeneration: options.identity.workerGeneration,
       taskService,
@@ -550,6 +596,37 @@ export async function startWorker(options: WorkerStartOptions): Promise<WorkerRu
         taskExecutionServices,
         taskCommandHandlers,
         providerHealthService,
+        async exportDiagnostics(destinationPath) {
+          const counts = database.prepare(
+            "SELECT state, COUNT(*) AS count FROM tasks GROUP BY state ORDER BY state"
+          ).all() as unknown as Array<{ state: string; count: number }>;
+          return exportDiagnosticBundle({
+            appVersion: "0.1.0",
+            platform: {
+              os: process.platform,
+              arch: process.arch,
+              electron: process.versions.electron ?? "unknown",
+              node: process.versions.node
+            },
+            providerHealth: await providerHealthService.list(),
+            taskStateCounts: Object.fromEntries(counts.map(({ state, count }) => [state, Number(count)])),
+            recentErrors: [...recentErrors]
+          }, destinationPath);
+        },
+        previewRoomCleanup: (roomId) => cleanupCommands.previewRoom(roomId),
+        removeRoomCleanup(receipt, command) {
+          const result = cleanupCommands.removeRoom(receipt, command);
+          if (!result.replayed) invalidateState();
+          return result;
+        },
+        previewWorktreeCleanup: (worktreeId) => cleanupService.previewWorktree(worktreeId),
+        archiveWorktreeCleanup: (receipt, idempotencyKey) => cleanupService.archiveWorktree(receipt, idempotencyKey),
+        previewProjectCleanup: (projectId) => cleanupCommands.previewProject(projectId),
+        removeProjectCleanup(receipt, command) {
+          const result = cleanupCommands.removeProject(receipt, command);
+          if (!result.replayed) invalidateState();
+          return result;
+        },
         prepareQuit: runtime.prepareQuit
       })
     });
@@ -583,10 +660,14 @@ export async function startWorker(options: WorkerStartOptions): Promise<WorkerRu
             const created = eventStore.after({ roomId: event.roomId, roomSeq: event.roomSeq, limit: 50 });
             for (const later of created.events) publishRoomEvent(later);
           }
-        } catch {
+        } catch (error) {
+          recordError("worker.request", error);
           stopQuietly();
         }
-      })().catch(() => stopQuietly());
+      })().catch((error: unknown) => {
+        recordError("worker.request.unhandled", error);
+        stopQuietly();
+      });
     };
 
     unsubscribe = options.port.onMessage(onMessage);
@@ -602,7 +683,8 @@ export async function startWorker(options: WorkerStartOptions): Promise<WorkerRu
     heartbeat = setInterval(() => {
       try {
         if (!leaseStore.heartbeat(options.identity, Date.now())) stopQuietly();
-      } catch {
+      } catch (error) {
+        recordError("worker.heartbeat", error);
         stopQuietly();
       }
     }, options.heartbeatIntervalMs);
@@ -611,6 +693,7 @@ export async function startWorker(options: WorkerStartOptions): Promise<WorkerRu
     if (lifecycle === "starting") lifecycle = "active";
     return runtime;
   } catch (error) {
+    recordError("worker.startup", error);
     stopQuietly();
     throw error;
   }

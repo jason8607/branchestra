@@ -1,9 +1,11 @@
 import { dialog, type BrowserWindow } from "electron";
 import type { ProviderId } from "../../shared/contracts/provider";
+import { pickDiagnosticDestination } from "../dialogs/save-dialog";
 
 export interface ProjectDialogAdapter {
   pickExistingProject(parentWindow: BrowserWindow): Promise<string | null>;
   pickProviderExecutable?(parentWindow: BrowserWindow, provider: ProviderId): Promise<string | null>;
+  pickDiagnosticDestination?(parentWindow: BrowserWindow): Promise<string | null>;
 }
 
 export function createElectronProjectDialog(): ProjectDialogAdapter {
@@ -23,17 +25,20 @@ export function createElectronProjectDialog(): ProjectDialogAdapter {
         properties: ["openFile", "dontAddToRecent"],
       });
       return result.canceled ? null : (result.filePaths[0] ?? null);
-    }
+    },
+    pickDiagnosticDestination
   };
 }
 
 export function createFixedProjectDialog(
   selectedPath: string,
-  providerPaths: Partial<Record<ProviderId, string>> = {}
+  providerPaths: Partial<Record<ProviderId, string>> = {},
+  diagnosticDestination?: string
 ): ProjectDialogAdapter {
   if (selectedPath.length === 0) throw new Error("E2E project path is empty");
   return {
     pickExistingProject: async () => selectedPath,
-    pickProviderExecutable: async (_parentWindow, provider) => providerPaths[provider] ?? null
+    pickProviderExecutable: async (_parentWindow, provider) => providerPaths[provider] ?? null,
+    pickDiagnosticDestination: async () => diagnosticDestination ?? null
   };
 }

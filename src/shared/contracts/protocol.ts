@@ -78,6 +78,31 @@ const externalOpen = z.object({
   url: z.string().min(1).max(4096),
   userGestureNonce: UuidSchema,
 }).strict();
+export const RoomCleanupPreviewSchema = z.object({
+  kind: z.literal("room"),
+  roomId: UuidSchema,
+  eventCount: z.number().int().nonnegative(),
+  throughSeq: z.number().int().nonnegative(),
+  activeTaskCount: z.number().int().nonnegative()
+}).strict();
+export type RoomCleanupPreview = z.infer<typeof RoomCleanupPreviewSchema>;
+const roomCleanupReceipt = RoomCleanupPreviewSchema.extend({ confirmation: z.string().min(1).max(128) }).strict();
+export const ProjectCleanupPreviewSchema = z.object({
+  kind: z.literal("project"),
+  projectId: UuidSchema,
+  roomCount: z.number().int().nonnegative(),
+  activeTaskCount: z.number().int().nonnegative()
+}).strict();
+export type ProjectCleanupPreview = z.infer<typeof ProjectCleanupPreviewSchema>;
+const projectCleanupReceipt = ProjectCleanupPreviewSchema.extend({ confirmation: z.string().min(1).max(128) }).strict();
+export const WorktreeCleanupPreviewSchema = z.object({
+  kind: z.literal("worktree"),
+  worktreeId: z.string().min(1).max(128),
+  headOid: TaskOidSchema,
+  dirtyHash: ScopeHashSchema.nullable()
+}).strict();
+export type WorktreeCleanupPreview = z.infer<typeof WorktreeCleanupPreviewSchema>;
+const worktreeCleanupReceipt = WorktreeCleanupPreviewSchema.extend({ allowDirtyArchive: z.boolean() }).strict();
 
 export const RendererRequestEnvelopeSchema = z.discriminatedUnion("type", [
   z.object({ ...base, workerGeneration: z.union([GenerationSchema, z.literal(ZERO_WORKER_GENERATION)]), type: z.literal("state.getSnapshot"), payload: snapshotRequest }).strict(),
@@ -85,6 +110,13 @@ export const RendererRequestEnvelopeSchema = z.discriminatedUnion("type", [
   z.object({ ...base, type: z.literal("project.pickExisting"), payload: empty }).strict(),
   z.object({ ...base, type: z.literal("provider.pickExecutable"), payload: providerPick }).strict(),
   z.object({ ...base, type: z.literal("provider.health.list"), payload: empty }).strict(),
+  z.object({ ...base, type: z.literal("diagnostics.export"), payload: empty }).strict(),
+  z.object({ ...base, type: z.literal("cleanup.room.preview"), payload: z.object({ roomId: UuidSchema }).strict() }).strict(),
+  z.object({ ...base, type: z.literal("cleanup.room.remove"), payload: roomCleanupReceipt }).strict(),
+  z.object({ ...base, type: z.literal("cleanup.worktree.preview"), payload: z.object({ worktreeId: z.string().min(1).max(128) }).strict() }).strict(),
+  z.object({ ...base, type: z.literal("cleanup.worktree.archive"), payload: worktreeCleanupReceipt }).strict(),
+  z.object({ ...base, type: z.literal("cleanup.project.preview"), payload: z.object({ projectId: UuidSchema }).strict() }).strict(),
+  z.object({ ...base, type: z.literal("cleanup.project.remove"), payload: projectCleanupReceipt }).strict(),
   z.object({ ...base, type: z.literal("external.open"), payload: externalOpen }).strict(),
   z.object({ ...base, type: z.literal("room.create"), payload: roomCreate }).strict(),
   z.object({ ...base, type: z.literal("message.post"), payload: messagePost }).strict(),
@@ -104,6 +136,13 @@ export const WorkerRequestEnvelopeSchema = z.discriminatedUnion("type", [
   z.object({ ...base, type: z.literal("project.addExisting"), payload: z.object({ selectedPath: z.string().min(1) }).strict() }).strict(),
   z.object({ ...base, type: z.literal("provider.executableSelected"), payload: providerSelected }).strict(),
   z.object({ ...base, type: z.literal("provider.health.list"), payload: empty }).strict(),
+  z.object({ ...base, type: z.literal("diagnostics.exportTo"), payload: z.object({ destinationPath: z.string().startsWith("/").max(4096) }).strict() }).strict(),
+  z.object({ ...base, type: z.literal("cleanup.room.preview"), payload: z.object({ roomId: UuidSchema }).strict() }).strict(),
+  z.object({ ...base, type: z.literal("cleanup.room.remove"), payload: roomCleanupReceipt }).strict(),
+  z.object({ ...base, type: z.literal("cleanup.worktree.preview"), payload: z.object({ worktreeId: z.string().min(1).max(128) }).strict() }).strict(),
+  z.object({ ...base, type: z.literal("cleanup.worktree.archive"), payload: worktreeCleanupReceipt }).strict(),
+  z.object({ ...base, type: z.literal("cleanup.project.preview"), payload: z.object({ projectId: UuidSchema }).strict() }).strict(),
+  z.object({ ...base, type: z.literal("cleanup.project.remove"), payload: projectCleanupReceipt }).strict(),
   z.object({ ...base, type: z.literal("room.create"), payload: roomCreate }).strict(),
   z.object({ ...base, type: z.literal("message.post"), payload: messagePost }).strict(),
   z.object({ ...base, type: z.literal("task.get"), payload: taskGet }).strict(),
@@ -117,7 +156,7 @@ export const WorkerRequestEnvelopeSchema = z.discriminatedUnion("type", [
   z.object({ ...base, type: z.literal("worker.prepareQuit"), payload: z.object({ deadlineMs: z.number().int().positive() }).strict() }).strict()
 ]);
 
-const responseData = z.union([AppSnapshotSchema, SnapshotPageSchema, RoomEventPageSchema, ProjectSchema, RoomSchema, RoomEventSchema, TaskRecordSchema, TaskInspectorModelSchema, z.array(ProviderHealthSchema), ProviderHealthSchema, z.object({ cancelled: z.literal(true) }).strict(), z.object({ prepared: z.literal(true) }).strict(), z.object({ opened: z.literal(true) }).strict()]);
+const responseData = z.union([AppSnapshotSchema, SnapshotPageSchema, RoomEventPageSchema, ProjectSchema, RoomSchema, RoomEventSchema, TaskRecordSchema, TaskInspectorModelSchema, RoomCleanupPreviewSchema, ProjectCleanupPreviewSchema, WorktreeCleanupPreviewSchema, z.array(ProviderHealthSchema), ProviderHealthSchema, z.object({ cancelled: z.literal(true) }).strict(), z.object({ prepared: z.literal(true) }).strict(), z.object({ opened: z.literal(true) }).strict(), z.object({ sha256: z.string().regex(/^[a-f0-9]{64}$/), bytes: z.number().int().positive() }).strict(), z.object({ removed: z.literal(true), kind: z.enum(["room", "project"]), id: UuidSchema }).strict(), z.object({ archived: z.literal(true), recoveryPath: z.string().startsWith("/").max(4096) }).strict()]);
 export const WorkerResponseEnvelopeSchema = z.object({
   ...base,
   type: z.literal("response"),

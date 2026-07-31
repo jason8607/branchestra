@@ -89,6 +89,20 @@ function commandFromEnvelope(envelope: WorkerRequestEnvelope): WorkerCommand {
       return { type: envelope.type, payload: envelope.payload };
     case "provider.health.list":
       return { type: envelope.type, payload: envelope.payload };
+    case "diagnostics.exportTo":
+      return { type: envelope.type, payload: envelope.payload };
+    case "cleanup.room.preview":
+      return { type: envelope.type, payload: envelope.payload };
+    case "cleanup.room.remove":
+      return { type: envelope.type, payload: envelope.payload };
+    case "cleanup.worktree.preview":
+      return { type: envelope.type, payload: envelope.payload };
+    case "cleanup.worktree.archive":
+      return { type: envelope.type, payload: envelope.payload };
+    case "cleanup.project.preview":
+      return { type: envelope.type, payload: envelope.payload };
+    case "cleanup.project.remove":
+      return { type: envelope.type, payload: envelope.payload };
     case "room.create":
       return { type: envelope.type, payload: envelope.payload };
     case "message.post":

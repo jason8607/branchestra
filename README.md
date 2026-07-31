@@ -10,4 +10,4 @@ Supported Provider CLIs are installed and authenticated separately. Branchestra 
 
 ## Development
 
-Use Node.js 24.18.0 and pnpm 11.15.1, then run `pnpm install --frozen-lockfile`, `pnpm typecheck`, `pnpm lint`, and `pnpm test`.
+Use Node.js 24.18.0 and pnpm 11.15.1, then run `pnpm install --frozen-lockfile` and `pnpm verify:all`. The aggregate gate includes typecheck, lint, unit/integration/security tests, source Electron E2E, an unsigned packaged-ASAR recovery journey, package-content policy, and license inventory.

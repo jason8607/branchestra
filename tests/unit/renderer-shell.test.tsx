@@ -103,6 +103,29 @@ function preloadedTimelineStore(): TimelineStore {
     pickProviderExecutable: vi.fn().mockResolvedValue(undefined),
     createRoom: vi.fn().mockResolvedValue(undefined),
     postMessage: vi.fn().mockResolvedValue(undefined),
+    exportDiagnostics: vi.fn().mockResolvedValue({ sha256: "a".repeat(64), bytes: 512 }),
+    previewRoomCleanup: vi.fn().mockResolvedValue({
+      kind: "room",
+      roomId: ROOM_ID,
+      eventCount: 1,
+      throughSeq: 1,
+      activeTaskCount: 0
+    }),
+    removeRoomCleanup: vi.fn().mockResolvedValue(undefined),
+    previewWorktreeCleanup: vi.fn().mockResolvedValue({
+      kind: "worktree",
+      worktreeId: "worktree-1",
+      headOid: "a".repeat(40),
+      dirtyHash: null
+    }),
+    archiveWorktreeCleanup: vi.fn().mockResolvedValue("/tmp/recovery/worktree-1"),
+    previewProjectCleanup: vi.fn().mockResolvedValue({
+      kind: "project",
+      projectId: PROJECT_ID,
+      roomCount: 1,
+      activeTaskCount: 0
+    }),
+    removeProjectCleanup: vi.fn().mockResolvedValue(undefined),
     dispose: vi.fn()
   };
 }

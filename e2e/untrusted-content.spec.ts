@@ -3,7 +3,7 @@ import { expect, test } from "@playwright/test";
 import { createGitRepository } from "../tests/fixtures/git-repository";
 import { launchBranchestraE2E } from "./support/branchestra-app";
 
-test("repository and Provider-shaped Markdown remains inert", async () => {
+test("untrusted timeline content cannot navigate, open windows, or fabricate controls", async () => {
   const repository = createGitRepository();
   const app = await launchBranchestraE2E({ scenario: "two-round-success", repositoryRoot: repository.root });
   try {
@@ -16,6 +16,7 @@ test("repository and Provider-shaped Markdown remains inert", async () => {
     await page.getByRole("button", { name: "Send message" }).click();
 
     const timeline = page.getByTestId("shared-timeline");
+    await expect(page.getByRole("button", { name: "Approve final merge" })).toHaveCount(0);
     await expect(timeline).toContainText("onerror=alert(1)");
     await expect(timeline.locator("img, form, input, iframe, object, embed, svg")).toHaveCount(0);
     await expect(timeline.locator('a[href^="javascript:"]')).toHaveCount(0);

@@ -3,7 +3,7 @@ import { expect, test } from "@playwright/test";
 import { createGitRepository } from "../tests/fixtures/git-repository";
 import { createAndApproveTask, launchBranchestraE2E } from "./support/branchestra-app";
 
-test("mentions, approves, collaborates twice, verifies, and merges only after final approval", async () => {
+test("dual-agent provider task approves, collaborates twice, verifies, and merges only after final approval", async () => {
   const repository = createGitRepository();
   const app = await launchBranchestraE2E({ scenario: "two-round-success", repositoryRoot: repository.root });
   try {

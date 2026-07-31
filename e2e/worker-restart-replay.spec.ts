@@ -3,7 +3,7 @@ import { expect, test } from "@playwright/test";
 import { createGitRepository } from "../tests/fixtures/git-repository";
 import { createAndApproveTask, launchBranchestraE2E } from "./support/branchestra-app";
 
-test("relaunches into Interrupted, previews recovery, and retains cancellation output", async () => {
+test("worker restart replays durable state into Interrupted without replaying side effects", async () => {
   const repository = createGitRepository();
   const first = await launchBranchestraE2E({ scenario: "interrupted-run", repositoryRoot: repository.root });
   const userDataDir = first.userDataDir;

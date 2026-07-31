@@ -19,6 +19,7 @@ export function Inspector(props: {
   taskPending?: boolean;
   taskError?: string | null;
   requestTask?(command: TaskWorkerCommand): Promise<TaskInspectorModel>;
+  settings?: React.ReactNode;
 }): React.JSX.Element {
   return (
     <aside className="room-inspector" data-testid="room-inspector" aria-labelledby="inspector-title">
@@ -54,6 +55,7 @@ export function Inspector(props: {
       {props.taskModel && props.requestTask ? (
         <TaskInspector model={props.taskModel} request={props.requestTask} />
       ) : null}
+      {props.settings}
     </aside>
   );
 }

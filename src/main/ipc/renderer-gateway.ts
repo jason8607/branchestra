@@ -120,6 +120,28 @@ export function registerRendererGateway(dependencies: RendererGatewayDependencie
         });
         break;
       }
+      case "diagnostics.export": {
+        if (!dependencies.dialog.pickDiagnosticDestination) throw new Error("Diagnostic destination picker is unavailable");
+        const destinationPath = await dependencies.dialog.pickDiagnosticDestination(dependencies.parentWindow);
+        const generationAfterDialog = dependencies.supervisor.getGeneration();
+        if (generationAfterDialog === null || generationAfterDialog !== activeGeneration) {
+          throw new Error("Worker generation changed while diagnostic dialog was open");
+        }
+        if (destinationPath === null) {
+          return WorkerResponseEnvelopeSchema.parse({
+            v: request.v, requestId: request.requestId, idempotencyKey: request.idempotencyKey,
+            workerGeneration: activeGeneration, type: "response",
+            payload: { ok: true, requestType: request.type, data: { cancelled: true }, replayed: false }
+          });
+        }
+        workerRequest = WorkerRequestEnvelopeSchema.parse({
+          ...request,
+          workerGeneration: activeGeneration,
+          type: "diagnostics.exportTo",
+          payload: { destinationPath }
+        });
+        break;
+      }
       case "state.getSnapshot":
       case "room.replay":
       case "room.create":
@@ -133,6 +155,12 @@ export function registerRendererGateway(dependencies: RendererGatewayDependencie
       case "task.recovery.preview":
       case "task.recovery.resolve":
       case "provider.health.list":
+      case "cleanup.room.preview":
+      case "cleanup.room.remove":
+      case "cleanup.worktree.preview":
+      case "cleanup.worktree.archive":
+      case "cleanup.project.preview":
+      case "cleanup.project.remove":
         workerRequest = WorkerRequestEnvelopeSchema.parse({
           ...request,
           workerGeneration: activeGeneration
@@ -152,7 +180,8 @@ export function registerRendererGateway(dependencies: RendererGatewayDependencie
     ) {
       throw new Error("Worker response correlation mismatch");
     }
-    if (request.type !== "project.pickExisting" && request.type !== "provider.pickExecutable") return workerResponse;
+    if (request.type !== "project.pickExisting" && request.type !== "provider.pickExecutable"
+      && request.type !== "diagnostics.export") return workerResponse;
     const rewritten = WorkerResponseEnvelopeSchema.parse({
       ...workerResponse,
       payload: {

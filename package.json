@@ -1,6 +1,8 @@
 {
   "name": "branchestra",
   "version": "0.1.0",
+  "description": "Local-first orchestration workspace for coding agents",
+  "author": "Branchestra contributors",
   "private": true,
   "type": "module",
   "main": "./out/main/index.js",
