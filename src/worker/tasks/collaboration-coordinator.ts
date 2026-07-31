@@ -1,26 +1,14 @@
 import type {
-  AgentProvider,
-  AgentRunRecord,
   ApprovalReceipt,
-  CheckpointRecord,
   RoomEvent,
-  TaskProviderEventSummary,
-  TaskRecord,
-  WorktreeRecord
+  TaskRecord
 } from "../../shared/contracts/domain";
-import { ApprovedWorkspace, hashBytes } from "../approvals/approved-workspace";
 import { hashCanonical } from "../approvals/canonical-json";
 import type { GitArtifactRepository } from "../git/git-artifact-repository";
 import type { GitManager } from "../git/git-manager";
-import { WorkspacePathGuard } from "../git/workspace-path-guard";
-import type { JournaledOperationRunner } from "../operations/journaled-operation-runner";
 import type { EventStore } from "../storage/event-store";
 import type { DomainRepositories } from "../storage/repositories";
-import type {
-  TaskProviderEvent,
-  TaskProviderPort,
-  TaskProviderRunHandle
-} from "./provider-port";
+import type { TaskEngine } from "./task-engine";
 import { transitionTask } from "./task-state-machine";
 
 export interface RequestRoundInput {
@@ -34,30 +22,14 @@ export interface CollaborationCoordinatorOptions {
   artifacts: GitArtifactRepository;
   events: EventStore;
   manager: Pick<GitManager,
-    "ensureAgentWorktree" | "createCheckpoint" | "getReadService" | "verifyCheckpointRef">;
-  provider: TaskProviderPort;
-  operations: JournaledOperationRunner;
+    "ensureAgentWorktree" | "getReadService" | "verifyCheckpointRef">;
+  engine: Pick<TaskEngine, "runCollaborationProvider">;
   workerGeneration: string;
   contextVersion: number;
   contextHash: `sha256:${string}`;
   id(): string;
   now(): string;
   publish?(event: RoomEvent): void | Promise<void>;
-}
-
-function otherProvider(provider: AgentProvider): AgentProvider {
-  return provider === "claude" ? "codex" : "claude";
-}
-
-function summarizeProviderEvent(event: TaskProviderEvent): TaskProviderEventSummary {
-  if (event.type === "workspace.writeText") {
-    return {
-      type: event.type,
-      relativePath: event.relativePath,
-      contentHash: hashBytes(Buffer.from(event.contents, "utf8"))
-    };
-  }
-  return event;
 }
 
 function findingsAreValid(findings: string[]): boolean {
@@ -112,57 +84,29 @@ export class CollaborationCoordinator {
       findings: input.findings
     });
     const tasks = this.options.repositories.tasks;
-    const replay = tasks.replayEngineCommand(input.idempotencyKey, requestType, requestHash);
-    if (replay) return replay;
     const task = tasks.getRequired(input.taskId);
-    if (task.state !== "Review1" && task.state !== "Review2") {
-      throw new Error(`TASK_NOT_IN_REVIEW:${task.state}`);
-    }
-    const started = [...this.options.events.after({
-      roomId: task.roomId,
-      roomSeq: 0,
-      limit: 500
-    }).events].reverse().find((event) =>
-      event.type === "review.started"
-      && event.payload.taskId === task.id
-      && event.payload.round === task.collaborationRoundsUsed
-    );
-    if (!started || started.type !== "review.started") {
-      throw new Error("DURABLE_REVIEW_CONTEXT_NOT_FOUND");
-    }
-    tasks.beginEngineCommand({
+    const completedAt = this.options.now();
+    const completion = tasks.completeCollaborationRound({
+      taskId: task.id,
+      round: task.collaborationRoundsUsed,
       idempotencyKey: input.idempotencyKey,
       requestType,
       requestHash,
+      findingsHash: hashCanonical(input.findings),
+      findings: input.findings,
       workerGeneration: this.options.workerGeneration,
-      createdAt: this.options.now()
+      transition: task.state === "Review1"
+        ? transitionTask(
+            { ...task, updatedAt: completedAt },
+            { type: "requestAgentRevision", findings: input.findings }
+          )
+        : null,
+      transitionEventId: this.options.id(),
+      eventId: this.options.id(),
+      createdAt: completedAt
     });
-    let result = task;
-    if (task.state === "Review1") {
-      result = tasks.applyTransition(
-        transitionTask(
-          { ...task, updatedAt: this.options.now() },
-          { type: "requestAgentRevision", findings: input.findings }
-        ),
-        this.options.id()
-      );
-    }
-    const event = this.options.events.append({
-      id: this.options.id(),
-      roomId: task.roomId,
-      type: "review.completed",
-      actor: "system",
-      payload: {
-        taskId: task.id,
-        round: task.collaborationRoundsUsed,
-        checkpointOid: started.payload.checkpointOid,
-        findings: [...input.findings]
-      },
-      createdAt: this.options.now()
-    });
-    tasks.completeEngineCommand(input.idempotencyKey, result, this.options.now());
-    await this.options.publish?.(event);
-    return result;
+    if (completion.event) await this.options.publish?.(completion.event);
+    return completion.task;
   }
 
   private async requestRoundOnce(input: RequestRoundInput): Promise<TaskRecord> {
@@ -210,41 +154,29 @@ export class CollaborationCoordinator {
       workerGeneration: this.options.workerGeneration,
       idempotencyKey: `${input.idempotencyKey}:worktree`
     });
-    tasks.beginEngineCommand({
+    const reviewStartedAt = this.options.now();
+    const started = tasks.startCollaborationRound({
       idempotencyKey: input.idempotencyKey,
       requestType,
       requestHash,
       workerGeneration: this.options.workerGeneration,
-      createdAt: this.options.now()
-    });
-    const reviewed = tasks.applyTransition(
-      transitionTask(
-        { ...tasks.getRequired(task.id), updatedAt: this.options.now() },
+      transition: transitionTask(
+        { ...tasks.getRequired(task.id), updatedAt: reviewStartedAt },
         { type: "beginReview", checkpointOid: checkpoint.oid }
       ),
-      this.options.id()
-    );
-    const reviewEvent = this.options.events.append({
-      id: this.options.id(),
-      roomId: task.roomId,
-      type: "review.started",
-      actor: "system",
-      payload: {
-        taskId: task.id,
-        round: reviewed.collaborationRoundsUsed,
-        purpose: input.purpose,
-        checkpointOid: checkpoint.oid,
-        diffSummary: {
-          filesChanged: diff.files.length,
-          files: diff.files.slice(0, 200)
-        }
+      purpose: input.purpose,
+      checkpointOid: checkpoint.oid,
+      diffSummary: {
+        filesChanged: diff.files.length,
+        files: diff.files.slice(0, 200)
       },
-      createdAt: this.options.now()
+      transitionEventId: this.options.id(),
+      reviewEventId: this.options.id(),
+      createdAt: reviewStartedAt
     });
-    await this.options.publish?.(reviewEvent);
-    await this.runOtherProvider({
-      task: reviewed,
-      receipt,
+    await this.options.publish?.(started.event);
+    await this.options.engine.runCollaborationProvider({
+      taskId: started.task.id,
       checkpoint,
       collaborator,
       purpose: input.purpose,
@@ -253,103 +185,6 @@ export class CollaborationCoordinator {
     const result = tasks.getRequired(task.id);
     tasks.completeEngineCommand(input.idempotencyKey, result, this.options.now());
     return result;
-  }
-
-  private async runOtherProvider(input: {
-    task: TaskRecord;
-    receipt: Extract<ApprovalReceipt, { kind: "task_scope" }>;
-    checkpoint: CheckpointRecord;
-    collaborator: WorktreeRecord;
-    purpose: RequestRoundInput["purpose"];
-    diffFiles: Array<{ path: string; status: string; additions: number; deletions: number }>;
-  }): Promise<void> {
-    const provider = otherProvider(input.task.leadProvider);
-    const role = input.purpose === "review" ? "reviewer" as const : "collaborator" as const;
-    const run: AgentRunRecord = {
-      id: this.options.id(),
-      taskId: input.task.id,
-      provider,
-      role,
-      providerSessionId: null,
-      contextVersion: this.options.contextVersion,
-      contextHash: this.options.contextHash,
-      state: "starting",
-      startedAt: this.options.now(),
-      finishedAt: null
-    };
-    this.options.repositories.tasks.insertRun(run);
-    let handle: TaskProviderRunHandle | null = null;
-    try {
-      handle = await this.options.provider.startRun({
-        runId: run.id,
-        taskId: input.task.id,
-        provider,
-        role,
-        worktreePath: input.collaborator.pathRealpath,
-        instruction: JSON.stringify({
-          task: input.task.requestText,
-          purpose: input.purpose,
-          immutableLeadCheckpointOid: input.checkpoint.oid,
-          roomContextHash: this.options.contextHash,
-          readOnlyGit: { diffSummary: input.diffFiles }
-        }),
-        contextVersion: run.contextVersion,
-        contextHash: run.contextHash,
-        checkpointOid: input.checkpoint.oid,
-        approvedCapabilities: {
-          workspaceRootRealpath: input.collaborator.pathRealpath,
-          readableRootsRealpath: [input.collaborator.pathRealpath],
-          commandClasses: input.receipt.scope.commandClasses,
-          toolNetwork: input.receipt.scope.toolNetwork,
-          allowCollaborator: false,
-          maxRunMs: input.receipt.scope.maxRunMs
-        }
-      });
-      this.options.repositories.tasks.updateRunSession(run.id, handle.sessionId, "running");
-      const workspace = input.purpose === "parallel_implementation"
-        ? await this.collaboratorWorkspace(input.task, input.collaborator)
-        : null;
-      for await (const providerEvent of handle.events) {
-        await this.recordProviderEvent(input.task, run, providerEvent);
-        if (providerEvent.type === "workspace.writeText") {
-          if (workspace === null) throw new Error("REVIEWER_WORKSPACE_MUTATION_FORBIDDEN");
-          await workspace.writeText(providerEvent.relativePath, providerEvent.contents);
-        }
-      }
-      const completion = await handle.completion;
-      if (completion.outcome !== "completed") {
-        throw new Error(completion.error?.code ?? "COLLABORATOR_RUN_FAILED");
-      }
-      this.options.repositories.tasks.updateRunState(run.id, "completed", this.options.now());
-      if (input.purpose === "parallel_implementation") {
-        const worktree = this.options.artifacts.getWorktree(input.task.id, "collaborator");
-        if (!worktree) throw new Error("COLLABORATOR_WORKTREE_NOT_FOUND");
-        const checkpoint = await this.options.manager.createCheckpoint({
-          projectId: input.task.projectId,
-          taskId: input.task.id,
-          worktree,
-          authorProvider: provider,
-          purpose: "implementation",
-          message: `Collaborator round ${input.task.collaborationRoundsUsed}`,
-          checkpointId: this.options.id(),
-          workerGeneration: this.options.workerGeneration,
-          idempotencyKey: `${run.id}:checkpoint`
-        });
-        const event = this.options.events.append({
-          id: this.options.id(),
-          roomId: input.task.roomId,
-          type: "checkpoint.created",
-          actor: "system",
-          payload: { checkpoint },
-          createdAt: this.options.now()
-        });
-        await this.options.publish?.(event);
-      }
-    } catch (error) {
-      this.options.repositories.tasks.updateRunState(run.id, "failed", this.options.now());
-      if (handle) await this.options.provider.cancelRun(run.id, "user").catch(() => undefined);
-      throw error;
-    }
   }
 
   private approvedScope(
@@ -367,40 +202,4 @@ export class CollaborationCoordinator {
     return receipt;
   }
 
-  private async collaboratorWorkspace(
-    task: TaskRecord,
-    worktree: WorktreeRecord
-  ): Promise<ApprovedWorkspace> {
-    const project = this.options.repositories.projects.findById(task.projectId);
-    if (!project) throw new Error(`PROJECT_NOT_FOUND:${task.projectId}`);
-    const guard = await WorkspacePathGuard.create({
-      repositoryRootRealpath: project.repositoryRoot,
-      worktreeRootRealpath: worktree.pathRealpath,
-      gitCommonDirRealpath: project.gitCommonDir
-    });
-    return new ApprovedWorkspace(guard, this.options.operations, {
-      projectId: task.projectId,
-      taskId: task.id,
-      commonDirRealpath: project.gitCommonDir,
-      workerGeneration: this.options.workerGeneration,
-      nextOperationId: this.options.id,
-      now: this.options.now
-    });
-  }
-
-  private async recordProviderEvent(
-    task: TaskRecord,
-    run: AgentRunRecord,
-    providerEvent: TaskProviderEvent
-  ): Promise<void> {
-    const event = this.options.events.append({
-      id: this.options.id(),
-      roomId: task.roomId,
-      type: "agent.run",
-      actor: run.provider,
-      payload: { run, event: summarizeProviderEvent(providerEvent) },
-      createdAt: this.options.now()
-    });
-    await this.options.publish?.(event);
-  }
 }

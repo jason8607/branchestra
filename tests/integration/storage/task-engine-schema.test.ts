@@ -27,14 +27,14 @@ describe("task engine schema", () => {
     const first = fixture();
     runMigrations(first.db);
     expect(first.db.prepare("SELECT version FROM schema_migrations ORDER BY version").all())
-      .toEqual([{ version: 1 }, { version: 2 }]);
+      .toEqual([{ version: 1 }, { version: 2 }, { version: 3 }]);
     first.db.close();
     opened.pop();
 
     const second = fixture(first.path);
     runMigrations(second.db);
     expect(second.db.prepare("SELECT version FROM schema_migrations ORDER BY version").all())
-      .toEqual([{ version: 1 }, { version: 2 }]);
+      .toEqual([{ version: 1 }, { version: 2 }, { version: 3 }]);
     expect(second.db.prepare("SELECT count(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'tasks'").get())
       .toEqual({ count: 1 });
   });

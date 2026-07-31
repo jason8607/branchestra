@@ -1,6 +1,7 @@
 import type {
   AgentRunRecord,
   ApprovalReceipt,
+  CheckpointRecord,
   RoomEvent,
   TaskProviderEventSummary,
   TaskRecord,
@@ -35,6 +36,19 @@ export interface TaskEngineOptions {
   id(): string;
   now(): string;
   publish?(event: RoomEvent): void | Promise<void>;
+}
+
+export interface CollaborationProviderRunInput {
+  taskId: string;
+  checkpoint: CheckpointRecord;
+  collaborator: WorktreeRecord;
+  purpose: "parallel_implementation" | "review";
+  diffFiles: Array<{
+    path: string;
+    status: string;
+    additions: number;
+    deletions: number;
+  }>;
 }
 
 interface ActiveRun {
@@ -74,11 +88,16 @@ function summarizeProviderEvent(event: TaskProviderEvent): TaskProviderEventSumm
   return event;
 }
 
+function otherProvider(provider: TaskRecord["leadProvider"]): TaskRecord["leadProvider"] {
+  return provider === "claude" ? "codex" : "claude";
+}
+
 export class TaskEngine {
   private readonly activeRuns = new Map<string, ActiveRun>();
   private readonly pendingRuns = new Map<string, PendingRun>();
   private readonly cancellationSettlements = new Map<string, Promise<TaskRecord>>();
   private readonly runLifecycles = new Map<string, RunLifecycle>();
+  private readonly sideEffectTails = new Map<string, Promise<void>>();
 
   constructor(private readonly options: TaskEngineOptions) {}
 
@@ -135,6 +154,182 @@ export class TaskEngine {
     } finally {
       if (this.runLifecycles.get(taskId) === lifecycle) {
         this.runLifecycles.delete(taskId);
+      }
+    }
+  }
+
+  async runCollaborationProvider(
+    input: CollaborationProviderRunInput
+  ): Promise<TaskRecord> {
+    const tasks = this.options.repositories.tasks;
+    const task = tasks.getRequired(input.taskId);
+    if (task.state !== "Review1" && task.state !== "Review2") {
+      throw new Error(`TASK_NOT_IN_REVIEW:${task.state}`);
+    }
+    const receipt = this.approvedScope(task);
+    const provider = otherProvider(task.leadProvider);
+    const role = input.purpose === "review" ? "reviewer" as const : "collaborator" as const;
+    const run: AgentRunRecord = {
+      id: this.options.id(),
+      taskId: task.id,
+      provider,
+      role,
+      providerSessionId: null,
+      contextVersion: this.options.contextVersion,
+      contextHash: this.options.contextHash,
+      state: "starting",
+      startedAt: this.options.now(),
+      finishedAt: null
+    };
+    const lifecycle = this.createRunLifecycle(task.id);
+    tasks.insertRun(run);
+    let handle: TaskProviderRunHandle | null = null;
+    let closeConsumer = () => {};
+    const deadline = setTimeout(() => {
+      void this.cancel(task.id, "timeout", `${run.id}:deadline`).catch(() => undefined);
+    }, receipt.scope.maxRunMs);
+    try {
+      const handlePromise = this.options.provider.startRun({
+        runId: run.id,
+        taskId: task.id,
+        provider,
+        role,
+        worktreePath: input.collaborator.pathRealpath,
+        instruction: JSON.stringify({
+          task: task.requestText,
+          purpose: input.purpose,
+          immutableLeadCheckpointOid: input.checkpoint.oid,
+          roomContextHash: this.options.contextHash,
+          readOnlyGit: { diffSummary: input.diffFiles }
+        }),
+        contextVersion: run.contextVersion,
+        contextHash: run.contextHash,
+        checkpointOid: input.checkpoint.oid,
+        approvedCapabilities: {
+          workspaceRootRealpath: input.collaborator.pathRealpath,
+          readableRootsRealpath: [input.collaborator.pathRealpath],
+          commandClasses: receipt.scope.commandClasses,
+          toolNetwork: receipt.scope.toolNetwork,
+          allowCollaborator: false,
+          maxRunMs: receipt.scope.maxRunMs
+        }
+      });
+      this.pendingRuns.set(task.id, { runId: run.id, handle: handlePromise, receipt });
+      const started = await this.raceRunLifecycle(handlePromise, lifecycle);
+      if (started.kind === "terminal") {
+        this.pendingRuns.delete(task.id);
+        lifecycle.settleConsumer();
+        void handlePromise.then(
+          (lateHandle) => this.retireProviderHandle(lateHandle),
+          () => undefined
+        );
+        return started.task;
+      }
+      handle = started.value;
+      this.pendingRuns.delete(task.id);
+      const iterator = handle.events[Symbol.asyncIterator]();
+      closeConsumer = this.consumerCloser(iterator);
+      const afterStart = tasks.getRequired(task.id);
+      if (!this.collaborationSideEffectsAllowed(afterStart, task.version)) {
+        closeConsumer();
+        lifecycle.settleConsumer();
+        return afterStart;
+      }
+      tasks.updateRunSession(run.id, handle.sessionId, "running");
+      this.activeRuns.set(task.id, { handle, receipt, closeConsumer });
+      const workspace = input.purpose === "parallel_implementation"
+        ? await this.approvedWorkspace(task, input.collaborator, receipt.scope.gitCommonDirRealpath)
+        : null;
+      while (true) {
+        const emitted = await this.raceRunLifecycle(iterator.next(), lifecycle);
+        if (emitted.kind === "terminal") {
+          closeConsumer();
+          lifecycle.settleConsumer();
+          return emitted.task;
+        }
+        if (emitted.value.done) break;
+        const event = emitted.value.value;
+        const allowed = await this.withTaskSideEffect(task.id, () =>
+          this.collaborationSideEffectsAllowed(
+            tasks.getRequired(task.id),
+            task.version
+          )
+        );
+        if (!allowed) {
+          closeConsumer();
+          lifecycle.settleConsumer();
+          return tasks.getRequired(task.id);
+        }
+        await this.recordProviderEvent(task, run, event);
+        if (event.type === "workspace.writeText") {
+          if (workspace === null) throw new Error("REVIEWER_WORKSPACE_MUTATION_FORBIDDEN");
+          await this.withTaskSideEffect(task.id, async () => {
+            const current = tasks.getRequired(task.id);
+            if (!this.collaborationSideEffectsAllowed(current, task.version)) return;
+            await workspace.writeText(event.relativePath, event.contents);
+          });
+        } else if (event.type === "run.completed" || event.type === "run.failed") {
+          closeConsumer();
+          break;
+        }
+      }
+      lifecycle.settleConsumer();
+      const settled = await this.raceRunLifecycle(handle.completion, lifecycle);
+      if (settled.kind === "terminal") return settled.task;
+      const current = tasks.getRequired(task.id);
+      if (!this.collaborationSideEffectsAllowed(current, task.version)) return current;
+      if (settled.value.outcome !== "completed") {
+        throw new Error(settled.value.error?.code ?? "COLLABORATOR_RUN_FAILED");
+      }
+      tasks.updateRunState(run.id, "completed", this.options.now());
+      if (input.purpose === "parallel_implementation") {
+        await this.withTaskSideEffect(task.id, async () => {
+          const beforeCheckpoint = tasks.getRequired(task.id);
+          if (!this.collaborationSideEffectsAllowed(beforeCheckpoint, task.version)) return;
+          const worktree = this.options.artifacts.getWorktree(task.id, "collaborator");
+          if (!worktree) throw new Error("COLLABORATOR_WORKTREE_NOT_FOUND");
+          const checkpoint = await this.options.manager.createCheckpoint({
+            projectId: task.projectId,
+            taskId: task.id,
+            worktree,
+            authorProvider: provider,
+            purpose: "implementation",
+            message: `Collaborator round ${task.collaborationRoundsUsed}`,
+            checkpointId: this.options.id(),
+            workerGeneration: this.options.workerGeneration,
+            idempotencyKey: `${run.id}:checkpoint`
+          });
+          const event = this.options.events.append({
+            id: this.options.id(),
+            roomId: task.roomId,
+            type: "checkpoint.created",
+            actor: "system",
+            payload: { checkpoint },
+            createdAt: this.options.now()
+          });
+          await this.options.publish?.(event);
+        });
+      }
+      return tasks.getRequired(task.id);
+    } catch (error) {
+      closeConsumer();
+      const persisted = tasks.getRun(run.id);
+      if (persisted?.state === "starting" || persisted?.state === "running") {
+        tasks.updateRunState(run.id, "failed", this.options.now());
+      }
+      if (handle) {
+        await this.options.provider.cancelRun(handle.runId, "timeout").catch(() => undefined);
+      }
+      throw error;
+    } finally {
+      clearTimeout(deadline);
+      this.activeRuns.delete(task.id);
+      this.pendingRuns.delete(task.id);
+      lifecycle.settleConsumer();
+      const result = tasks.getRequired(task.id);
+      lifecycle.settle(result);
+      if (this.runLifecycles.get(task.id) === lifecycle) {
+        this.runLifecycles.delete(task.id);
       }
     }
   }
@@ -406,10 +601,17 @@ export class TaskEngine {
       this.settleRunLifecycle(taskId, task);
       return task;
     }
-    task = this.transition(task, { type: "cancel", reason });
+    const cancellationTarget = await this.withTaskSideEffect(taskId, () => {
+      const transitioned = this.transition(task, { type: "cancel", reason });
+      return {
+        task: transitioned,
+        active: this.activeRuns.get(taskId),
+        pending: this.pendingRuns.get(taskId)
+      };
+    });
+    task = cancellationTarget.task;
     if (task.state === "CancelRequested") {
-      const active = this.activeRuns.get(taskId);
-      const pending = this.pendingRuns.get(taskId);
+      const { active, pending } = cancellationTarget;
       const receipt = active?.receipt ?? pending?.receipt;
       if (receipt) {
         const runId = active?.handle.runId ?? pending?.runId;
@@ -506,6 +708,33 @@ export class TaskEngine {
 
   private providerSideEffectsAllowed(task: TaskRecord): boolean {
     return task.state === "Working" || task.state === "CancelRequested";
+  }
+
+  private collaborationSideEffectsAllowed(
+    task: TaskRecord,
+    expectedVersion: number
+  ): boolean {
+    return (task.state === "Review1" || task.state === "Review2")
+      && task.version === expectedVersion;
+  }
+
+  private async withTaskSideEffect<T>(
+    taskId: string,
+    operation: () => T | Promise<T>
+  ): Promise<T> {
+    const previous = this.sideEffectTails.get(taskId) ?? Promise.resolve();
+    const release = Promise.withResolvers<void>();
+    const tail = previous.catch(() => undefined).then(() => release.promise);
+    this.sideEffectTails.set(taskId, tail);
+    await previous.catch(() => undefined);
+    try {
+      return await operation();
+    } finally {
+      release.resolve();
+      if (this.sideEffectTails.get(taskId) === tail) {
+        this.sideEffectTails.delete(taskId);
+      }
+    }
   }
 
   private async raceRunLifecycle<T>(

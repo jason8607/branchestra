@@ -149,6 +149,83 @@ export const TASK_ENGINE_SCHEMA_SQL = `
     updated_at TEXT NOT NULL
   );
   CREATE INDEX operation_journal_incomplete ON operation_journal(project_id, status);
+
+  CREATE TABLE task_service_commands (
+    idempotency_key TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE RESTRICT,
+    request_type TEXT NOT NULL,
+    request_hash TEXT NOT NULL,
+    round INTEGER,
+    expected_task_version INTEGER NOT NULL,
+    worker_generation TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('pending','completed','failed')),
+    result_json TEXT,
+    error_code TEXT,
+    error_message TEXT,
+    created_at TEXT NOT NULL,
+    completed_at TEXT
+  );
+  CREATE UNIQUE INDEX collaboration_round_completion_once
+    ON task_service_commands(task_id, request_type, round)
+    WHERE request_type = 'collaboration.completeReview';
+  CREATE UNIQUE INDEX one_pending_checkpoint_integration
+    ON task_service_commands(task_id)
+    WHERE request_type = 'integration.integrateSelectedCheckpoints' AND status = 'pending';
+
+  CREATE TABLE collaboration_rounds (
+    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE RESTRICT,
+    round INTEGER NOT NULL CHECK (round > 0),
+    request_idempotency_key TEXT NOT NULL UNIQUE,
+    request_hash TEXT NOT NULL,
+    purpose TEXT NOT NULL CHECK (purpose IN ('parallel_implementation','review')),
+    checkpoint_oid TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('started','completed')),
+    findings_hash TEXT,
+    findings_json TEXT,
+    result_task_json TEXT,
+    created_at TEXT NOT NULL,
+    completed_at TEXT,
+    PRIMARY KEY(task_id, round)
+  );
+`;
+
+const DURABLE_TASK_SERVICE_SCHEMA_SQL = `
+  CREATE TABLE IF NOT EXISTS task_service_commands (
+    idempotency_key TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE RESTRICT,
+    request_type TEXT NOT NULL,
+    request_hash TEXT NOT NULL,
+    round INTEGER,
+    expected_task_version INTEGER NOT NULL,
+    worker_generation TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('pending','completed','failed')),
+    result_json TEXT,
+    error_code TEXT,
+    error_message TEXT,
+    created_at TEXT NOT NULL,
+    completed_at TEXT
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS collaboration_round_completion_once
+    ON task_service_commands(task_id, request_type, round)
+    WHERE request_type = 'collaboration.completeReview';
+  CREATE UNIQUE INDEX IF NOT EXISTS one_pending_checkpoint_integration
+    ON task_service_commands(task_id)
+    WHERE request_type = 'integration.integrateSelectedCheckpoints' AND status = 'pending';
+  CREATE TABLE IF NOT EXISTS collaboration_rounds (
+    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE RESTRICT,
+    round INTEGER NOT NULL CHECK (round > 0),
+    request_idempotency_key TEXT NOT NULL UNIQUE,
+    request_hash TEXT NOT NULL,
+    purpose TEXT NOT NULL CHECK (purpose IN ('parallel_implementation','review')),
+    checkpoint_oid TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('started','completed')),
+    findings_hash TEXT,
+    findings_json TEXT,
+    result_task_json TEXT,
+    created_at TEXT NOT NULL,
+    completed_at TEXT,
+    PRIMARY KEY(task_id, round)
+  );
 `;
 
 const migrations = [{
@@ -203,6 +280,9 @@ const migrations = [{
 }, {
   version: 2,
   sql: TASK_ENGINE_SCHEMA_SQL
+}, {
+  version: 3,
+  sql: DURABLE_TASK_SERVICE_SCHEMA_SQL
 }] as const;
 
 export function runMigrations(database: Database): void {

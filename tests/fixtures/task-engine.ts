@@ -82,11 +82,21 @@ export async function createApprovedTaskFixture(
     id: options.id ?? randomUUID,
     now
   });
-  const allEvents = (): RoomEvent[] => eventStore.after({
-    roomId: room.id,
-    roomSeq: 0,
-    limit: 500
-  }).events;
+  const allEvents = (): RoomEvent[] => {
+    const events: RoomEvent[] = [];
+    let roomSeq = 0;
+    while (true) {
+      const page = eventStore.after({
+        roomId: room.id,
+        roomSeq,
+        limit: 500
+      });
+      events.push(...page.events);
+      if (!page.hasMore) return events;
+      if (page.nextRoomSeq === roomSeq) throw new Error("EVENT_FIXTURE_CURSOR_STALLED");
+      roomSeq = page.nextRoomSeq;
+    }
+  };
 
   return {
     service,
@@ -208,14 +218,17 @@ export async function createTaskEngineFixture(options: TaskEngineFixtureOptions)
     steps: options.mockScript
   }));
   const calls = { startRun: 0, resumeRun: 0, cancelRun: 0 };
+  const providerRequests: TaskProviderRunRequest[] = [];
   const providerTarget = options.providerOverride ?? mock;
   const provider: TaskProviderPort = {
     async startRun(request) {
       calls.startRun += 1;
+      providerRequests.push(request);
       return providerTarget.startRun(request);
     },
     async resumeRun(request) {
       calls.resumeRun += 1;
+      providerRequests.push(request);
       return providerTarget.resumeRun(request);
     },
     async cancelRun(runId, reason) {
@@ -248,6 +261,7 @@ export async function createTaskEngineFixture(options: TaskEngineFixtureOptions)
     mock,
     provider,
     repositories: base.repositories,
+    databaseFixture: base.databaseFixture,
     eventStore: base.eventStore,
     tasks: base.repositories.tasks,
     events: {
@@ -275,7 +289,27 @@ export async function createTaskEngineFixture(options: TaskEngineFixtureOptions)
       };
     },
     providerCalls: () => ({ ...calls }),
+    providerRequests: () => [...providerRequests],
     gitMutationCalls: () => gitArgvHistory.map((argv) => argv.join(" ")),
+    gitCommandCalls: () => gitArgvHistory.map((argv) => [...argv]),
+    appendNoiseEvents(count: number) {
+      const createdAt = base.project.createdAt;
+      for (let index = 0; index < count; index += 1) {
+        base.eventStore.append({
+          id: randomUUID(),
+          roomId: base.room.id,
+          type: "message.posted",
+          actor: "user",
+          payload: {
+            id: randomUUID(),
+            roomId: base.room.id,
+            body: `noise-${index}`,
+            createdAt
+          },
+          createdAt
+        });
+      }
+    },
     captureGitState: base.captureGitState,
     async prepareLead(key: string) {
       return manager.ensureAgentWorktree({
@@ -339,7 +373,9 @@ export interface CollaborationFixtureOptions {
   roundsUsed?: number;
   allowCollaborator?: boolean;
   reviewerWrites?: boolean;
+  reviewerWaitsForCancel?: boolean;
   parallelImplementation?: boolean;
+  maxRunMs?: number;
 }
 
 export async function createCollaborationFixture(
@@ -357,6 +393,9 @@ export async function createCollaborationFixture(
         ? [
             ...(options.reviewerWrites
               ? [{ type: "workspace.writeText" as const, relativePath: "forbidden.txt", contents: "no\n" }]
+              : []),
+            ...(options.reviewerWaitsForCancel
+              ? [{ type: "waitForCancel" as const }]
               : []),
             { type: "run.completed", summary: "Review completed" }
           ]
@@ -388,6 +427,7 @@ export async function createCollaborationFixture(
     ...(options.allowCollaborator === undefined
       ? {}
       : { allowCollaborator: options.allowCollaborator }),
+    ...(options.maxRunMs === undefined ? {} : { maxRunMs: options.maxRunMs }),
     providerOverride: provider
   });
   const desiredState = options.state;
@@ -407,8 +447,7 @@ export async function createCollaborationFixture(
     artifacts: base.artifacts,
     events: base.eventStore,
     manager: base.manager,
-    provider,
-    operations: new JournaledOperationRunner(base.repositories.operations),
+    engine: base.engine,
     workerGeneration: base.generation,
     contextVersion: 1,
     contextHash: `sha256:${"1".repeat(64)}`,
@@ -455,6 +494,11 @@ export async function createCollaborationFixture(
     collaboration,
     mock: {
       requests: () => [...requests],
+      waitUntilBlocked: () => scripted.waitUntilBlocked(),
+      async cancelLastRun(reason: "user" | "quit" | "timeout" = "user") {
+        const request = requests.at(-1);
+        if (request) await scripted.cancelRun(request.runId, reason);
+      },
       lastRequest(providerName: "claude" | "codex") {
         const request = [...requests].reverse().find(({ provider }) => provider === providerName);
         if (!request) throw new Error(`MOCK_REQUEST_NOT_FOUND:${providerName}`);
@@ -543,12 +587,14 @@ export interface IntegrationFixtureOptions {
   conflict: boolean;
   multiple?: boolean;
   foreignCheckpoint?: boolean;
+  state?: TaskRecord["state"];
+  pauseBeforeMutation?: boolean;
 }
 
 export async function createIntegrationFixture(options: IntegrationFixtureOptions) {
   const base = await createTaskEngineFixture({
     mockScript: [],
-    initialState: "Review2"
+    initialState: options.state ?? "Review2"
   });
   const lead = await base.manager.ensureAgentWorktree({
     projectId: base.project.id,
@@ -656,12 +702,26 @@ export async function createIntegrationFixture(options: IntegrationFixtureOption
     });
   }
 
+  const integrationReserved = Promise.withResolvers<void>();
+  const releaseIntegration = Promise.withResolvers<void>();
+  const integrationManager = options.pauseBeforeMutation
+    ? {
+        verifyCheckpointRef: base.manager.verifyCheckpointRef.bind(base.manager),
+        async integrateCheckpoint(
+          input: Parameters<GitManager["integrateCheckpoint"]>[0]
+        ) {
+          integrationReserved.resolve();
+          await releaseIntegration.promise;
+          return base.manager.integrateCheckpoint(input);
+        }
+      }
+    : base.manager;
   const integration = new IntegrationService({
     artifacts: base.artifacts,
     tasks: base.tasks,
     projects: base.repositories.projects,
     events: base.eventStore,
-    manager: base.manager,
+    manager: integrationManager,
     id: base.id,
     now: base.now
   });
@@ -684,8 +744,28 @@ export async function createIntegrationFixture(options: IntegrationFixtureOption
     async gitAtLead(...argv: string[]) {
       return (await base.repository.run(argv, lead.pathRealpath)).stdout.trim();
     },
-    providerGitMutationCalls() {
-      return [] as string[];
+    waitUntilIntegrationReserved: () => integrationReserved.promise,
+    releaseIntegration: () => releaseIntegration.resolve(),
+    spoofNextContinueCommonDir(commonDirRealpath: string) {
+      const internals = base.manager as unknown as {
+        readService: GitReadService;
+      };
+      const original = internals.readService;
+      let pending = true;
+      internals.readService = new Proxy(original, {
+        get(target, property, receiver) {
+          if (property === "inspectRepository") {
+            return async (...args: Parameters<GitReadService["inspectRepository"]>) => {
+              const identity = await target.inspectRepository(...args);
+              if (!pending) return identity;
+              pending = false;
+              return { ...identity, commonDirRealpath };
+            };
+          }
+          const value = Reflect.get(target, property, receiver);
+          return typeof value === "function" ? value.bind(target) : value;
+        }
+      });
     }
   };
 }

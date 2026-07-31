@@ -4,6 +4,7 @@ import { MAX_IPC_BYTES, encodedEnvelopeBytes, type WorkerCommand } from "../../s
 import type { ProjectService } from "../domain/project-service";
 import type { RoomService } from "../domain/room-service";
 import type { TaskService } from "../tasks/task-service";
+import type { TaskExecutionServices } from "../tasks/task-execution-services";
 import { parseAgentMentions } from "../tasks/mention-parser";
 import type { AnyCommandHandler, CommandHandler } from "./command-handler";
 
@@ -13,6 +14,7 @@ export interface CommandHandlerServices {
   taskService: Pick<TaskService,
     "createFromUserMessage" | "decideScope" | "grantAdditionalRounds"
     | "decideScopeResult" | "grantAdditionalRoundsResult">;
+  taskExecutionServices?: TaskExecutionServices;
   prepareQuit(deadlineMs: number): Promise<void>;
 }
 

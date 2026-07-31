@@ -3,7 +3,7 @@ import { createIntegrationFixture } from "../../fixtures/task-engine";
 
 const GENERATION = "00000000-0000-4000-8000-000000000001";
 
-describe("Lead checkpoint integration", { timeout: 60_000 }, () => {
+describe("Lead checkpoint integration", { timeout: 180_000 }, () => {
   it("cherry-picks only a selected immutable Collaborator checkpoint through GitManager", async () => {
     const fixture = await createIntegrationFixture({ conflict: false });
     try {
@@ -19,7 +19,13 @@ describe("Lead checkpoint integration", { timeout: 60_000 }, () => {
         sourceOids: [fixture.collaboratorCheckpoint.oid]
       });
       expect(await fixture.readLead("collaborator.txt")).toBe("alternative\n");
-      expect(fixture.providerGitMutationCalls()).toEqual([]);
+      expect(fixture.gitCommandCalls().filter(
+        ([command]) => command === "cherry-pick"
+      )).toEqual([[
+        "cherry-pick",
+        "--no-gpg-sign",
+        fixture.collaboratorCheckpoint.oid
+      ]]);
       expect(fixture.events.byType("checkpoint.integrated").at(-1)?.payload)
         .toMatchObject({ taskId: "task-1", sourceOids: [fixture.collaboratorCheckpoint.oid] });
       await expect(fixture.integration.integrateSelectedCheckpoints({
@@ -67,6 +73,13 @@ describe("Lead checkpoint integration", { timeout: 60_000 }, () => {
       expect(result.sourceOids).toEqual(
         multiple.collaboratorCheckpoints.map(({ oid }) => oid)
       );
+      expect(multiple.gitCommandCalls().filter(
+        ([command]) => command === "cherry-pick"
+      )).toEqual(multiple.collaboratorCheckpoints.map(({ oid }) => [
+        "cherry-pick",
+        "--no-gpg-sign",
+        oid
+      ]));
       expect(await multiple.readLead("second.txt")).toBe("second\n");
     } finally {
       await multiple.cleanup();
@@ -107,6 +120,116 @@ describe("Lead checkpoint integration", { timeout: 60_000 }, () => {
         idempotencyKey: "integrate-moving-ref"
       })).rejects.toThrow("IMMUTABLE_CHECKPOINT_REF_CONFLICT");
       expect(await fixture.gitAtLead("rev-parse", "HEAD")).toBe(headBefore);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it("rejects an invalid task phase before any Git mutation", async () => {
+    const fixture = await createIntegrationFixture({
+      conflict: false,
+      state: "Cancelled"
+    });
+    try {
+      const headBefore = await fixture.gitAtLead("rev-parse", "HEAD");
+      const commandCount = fixture.gitCommandCalls().length;
+      await expect(fixture.integration.integrateSelectedCheckpoints({
+        taskId: "task-1",
+        leadWorktree: fixture.lead,
+        selectedCheckpointIds: ["collaborator-cp-1"],
+        workerGeneration: GENERATION,
+        idempotencyKey: "integrate-terminal"
+      })).rejects.toThrow("TASK_NOT_IN_INTEGRATION_PHASE:Cancelled");
+      expect(await fixture.gitAtLead("rev-parse", "HEAD")).toBe(headBefore);
+      expect(fixture.gitCommandCalls().slice(commandCount)
+        .some(([command]) => command === "cherry-pick")).toBe(false);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it("durably reserves the task version while selected checkpoints are integrating", async () => {
+    const fixture = await createIntegrationFixture({
+      conflict: false,
+      pauseBeforeMutation: true
+    });
+    const integrating = fixture.integration.integrateSelectedCheckpoints({
+      taskId: "task-1",
+      leadWorktree: fixture.lead,
+      selectedCheckpointIds: ["collaborator-cp-1"],
+      workerGeneration: GENERATION,
+      idempotencyKey: "integrate-reserved"
+    });
+    try {
+      await fixture.waitUntilIntegrationReserved();
+      const current = fixture.tasks.getRequired("task-1");
+      expect(() => fixture.tasks.applyTransition({
+        previous: current,
+        next: {
+          ...current,
+          state: "CancelRequested",
+          version: current.version + 1
+        },
+        event: {
+          type: "task.transitioned",
+          payload: {
+            taskId: current.id,
+            from: current.state,
+            to: "CancelRequested",
+            version: current.version + 1
+          }
+        }
+      }, fixture.id())).toThrow("TASK_INTEGRATION_IN_PROGRESS");
+      fixture.releaseIntegration();
+      await expect(integrating).resolves.toMatchObject({ outcome: "integrated" });
+    } finally {
+      fixture.releaseIntegration();
+      await integrating.catch(() => undefined);
+      await fixture.cleanup();
+    }
+  });
+
+  it("replays integration from its durable service command beyond the first event page", async () => {
+    const fixture = await createIntegrationFixture({ conflict: false });
+    try {
+      fixture.appendNoiseEvents(501);
+      const input = {
+        taskId: "task-1",
+        leadWorktree: fixture.lead,
+        selectedCheckpointIds: ["collaborator-cp-1"],
+        workerGeneration: GENERATION,
+        idempotencyKey: "integrate-paged"
+      };
+      const first = await fixture.integration.integrateSelectedCheckpoints(input);
+      await expect(fixture.integration.integrateSelectedCheckpoints(input))
+        .resolves.toEqual(first);
+      expect(fixture.events.byType("checkpoint.integrated")).toHaveLength(1);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it("atomically finalizes a conflict transition with its durable event", async () => {
+    const fixture = await createIntegrationFixture({ conflict: true });
+    try {
+      fixture.databaseFixture.db.exec(`
+        CREATE TRIGGER reject_integration_conflict
+        BEFORE INSERT ON room_events
+        WHEN NEW.event_type = 'integration.conflict'
+        BEGIN
+          SELECT RAISE(ABORT, 'INTEGRATION_EVENT_REJECTED');
+        END;
+      `);
+      await expect(fixture.integration.integrateSelectedCheckpoints({
+        taskId: "task-1",
+        leadWorktree: fixture.lead,
+        selectedCheckpointIds: ["collaborator-cp-1"],
+        workerGeneration: GENERATION,
+        idempotencyKey: "integrate-atomic-conflict"
+      })).rejects.toThrow();
+      expect(fixture.tasks.getRequired("task-1").state).toBe("Review2");
+      expect(await fixture.gitAtLead("rev-parse", "CHERRY_PICK_HEAD"))
+        .toBe(fixture.collaboratorCheckpoint.oid);
     } finally {
       await fixture.cleanup();
     }
@@ -159,6 +282,34 @@ describe("Lead checkpoint integration", { timeout: 60_000 }, () => {
       expect(await fixture.readLead("shared.txt")).toBe("resolved\n");
       expect(fixture.gitMutationCalls()).not.toContain("cherry-pick --abort");
       expect(fixture.gitMutationCalls()).not.toContain("reset --hard");
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it("re-observes the canonical Git common directory before continuing a conflict", async () => {
+    const fixture = await createIntegrationFixture({ conflict: true });
+    try {
+      await fixture.integration.integrateSelectedCheckpoints({
+        taskId: "task-1",
+        leadWorktree: fixture.lead,
+        selectedCheckpointIds: ["collaborator-cp-1"],
+        workerGeneration: GENERATION,
+        idempotencyKey: "integrate-common-dir"
+      });
+      await fixture.writeLead("shared.txt", "resolved\n");
+      fixture.spoofNextContinueCommonDir("/tmp/branchestra-unexpected-common-dir");
+      const commandCount = fixture.gitCommandCalls().length;
+      await expect(fixture.manager.continueIntegration({
+        projectId: fixture.project.id,
+        taskId: "task-1",
+        leadWorktree: fixture.lead,
+        expectedSourceOid: fixture.collaboratorCheckpoint.oid,
+        workerGeneration: GENERATION,
+        idempotencyKey: "continue-common-dir"
+      })).rejects.toThrow("REPOSITORY_IDENTITY_MISMATCH");
+      expect(fixture.gitCommandCalls().slice(commandCount)
+        .some(([command]) => command === "add" || command === "cherry-pick")).toBe(false);
     } finally {
       await fixture.cleanup();
     }

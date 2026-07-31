@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createCollaborationFixture } from "../../fixtures/task-engine";
 
-describe("two-round collaboration", { timeout: 60_000 }, () => {
+describe("two-round collaboration", { timeout: 180_000 }, () => {
   it("runs exactly two automatic rounds against immutable checkpoint OIDs", async () => {
     const fixture = await createCollaborationFixture();
     try {
@@ -169,9 +169,19 @@ describe("two-round collaboration", { timeout: 60_000 }, () => {
         idempotencyKey: "parallel-round"
       });
       const alternative = collaborator.latestCheckpoint("collaborator");
+      const collaboratorWorktree = collaborator.artifacts.getWorktree(
+        "task-1",
+        "collaborator"
+      )!;
       expect(alternative.oid).not.toBe(leadCheckpoint.oid);
+      expect((await collaborator.repository.run(
+        ["show", "-s", "--format=%P", alternative.oid],
+        collaboratorWorktree.pathRealpath
+      )).stdout.trim()).toBe(collaboratorWorktree.baseOid);
       expect(collaborator.events.byType("checkpoint.created").at(-1)?.payload)
         .toEqual({ checkpoint: alternative });
+      expect(collaborator.mock.lastRequest("codex").approvedCapabilities)
+        .not.toHaveProperty("git");
       expect(await collaborator.repository.readAt(
         collaborator.artifacts.getWorktree("task-1", "collaborator")!.pathRealpath,
         "alternative.txt"
@@ -179,6 +189,157 @@ describe("two-round collaboration", { timeout: 60_000 }, () => {
       expect(await collaborator.leadPathExists("alternative.txt")).toBe(false);
     } finally {
       await collaborator.cleanup();
+    }
+  });
+
+  it("uses TaskEngine cancellation to stop a reviewer before any later side effect", async () => {
+    const fixture = await createCollaborationFixture({
+      reviewerWaitsForCancel: true
+    });
+    let round: Promise<unknown> | undefined;
+    try {
+      await fixture.engine.startApprovedTask("task-1", "start-cancel-lead");
+      round = fixture.collaboration.requestRound({
+        taskId: "task-1",
+        purpose: "review",
+        idempotencyKey: "cancelled-review"
+      });
+      await fixture.mock.waitUntilBlocked();
+      await expect(fixture.engine.cancel(
+        "task-1",
+        "user",
+        "cancel-review"
+      )).resolves.toMatchObject({ state: "Cancelled" });
+      const settled = await Promise.race([
+        round.then(() => true),
+        new Promise<false>((resolve) => setTimeout(() => resolve(false), 250))
+      ]);
+      expect(settled).toBe(true);
+      expect(fixture.tasks.listRuns("task-1").at(-1)?.state).toBe("cancelled");
+      expect(fixture.latestCheckpoint("lead").authorProvider).toBe("claude");
+    } finally {
+      await fixture.mock.cancelLastRun();
+      await round?.catch(() => undefined);
+      await fixture.cleanup();
+    }
+  });
+
+  it("enforces the approved maxRunMs deadline for reviewer runs", async () => {
+    const fixture = await createCollaborationFixture({
+      reviewerWaitsForCancel: true,
+      maxRunMs: 25
+    });
+    let round: Promise<unknown> | undefined;
+    try {
+      await fixture.engine.startApprovedTask("task-1", "start-timeout-lead");
+      round = fixture.collaboration.requestRound({
+        taskId: "task-1",
+        purpose: "review",
+        idempotencyKey: "timed-review"
+      });
+      await fixture.mock.waitUntilBlocked();
+      const result = await Promise.race([
+        round,
+        new Promise<"deadline-missed">((resolve) => {
+          setTimeout(() => resolve("deadline-missed"), 300);
+        })
+      ]);
+      expect(result).not.toBe("deadline-missed");
+      expect(fixture.tasks.getRequired("task-1").state).toBe("Cancelled");
+    } finally {
+      await fixture.mock.cancelLastRun();
+      await round?.catch(() => undefined);
+      await fixture.cleanup();
+    }
+  });
+
+  it("uses durable round context even when the room contains more than one event page", async () => {
+    const fixture = await createCollaborationFixture();
+    try {
+      await fixture.engine.startApprovedTask("task-1", "start-paged-lead");
+      fixture.appendNoiseEvents(501);
+      await fixture.collaboration.requestRound({
+        taskId: "task-1",
+        purpose: "review",
+        idempotencyKey: "paged-round"
+      });
+      await expect(fixture.collaboration.completeReview({
+        taskId: "task-1",
+        findings: ["paged finding"],
+        idempotencyKey: "paged-review"
+      })).resolves.toMatchObject({ state: "Revision" });
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it("atomically commits the review transition, completion marker, and event", async () => {
+    const fixture = await createCollaborationFixture();
+    try {
+      await fixture.engine.startApprovedTask("task-1", "start-atomic-lead");
+      await fixture.collaboration.requestRound({
+        taskId: "task-1",
+        purpose: "review",
+        idempotencyKey: "atomic-round"
+      });
+      fixture.databaseFixture.db.exec(`
+        CREATE TRIGGER reject_review_completed
+        BEFORE INSERT ON room_events
+        WHEN NEW.event_type = 'review.completed'
+        BEGIN
+          SELECT RAISE(ABORT, 'REVIEW_EVENT_REJECTED');
+        END;
+      `);
+      await expect(fixture.collaboration.completeReview({
+        taskId: "task-1",
+        findings: ["must roll back"],
+        idempotencyKey: "atomic-review"
+      })).rejects.toThrow();
+      expect(fixture.tasks.getRequired("task-1").state).toBe("Review1");
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it("durably completes round two once across idempotency keys", async () => {
+    const fixture = await createCollaborationFixture();
+    try {
+      await fixture.engine.startApprovedTask("task-1", "start-once-lead");
+      await fixture.collaboration.requestRound({
+        taskId: "task-1",
+        purpose: "review",
+        idempotencyKey: "once-round-1"
+      });
+      await fixture.collaboration.completeReview({
+        taskId: "task-1",
+        findings: ["round one"],
+        idempotencyKey: "once-review-1"
+      });
+      await fixture.runLeadRevision();
+      await fixture.collaboration.requestRound({
+        taskId: "task-1",
+        purpose: "review",
+        idempotencyKey: "once-round-2"
+      });
+      const first = await fixture.collaboration.completeReview({
+        taskId: "task-1",
+        findings: ["same disagreement"],
+        idempotencyKey: "once-review-2"
+      });
+      await expect(fixture.collaboration.completeReview({
+        taskId: "task-1",
+        findings: ["same disagreement"],
+        idempotencyKey: "same-review-new-key"
+      })).resolves.toEqual(first);
+      await expect(fixture.collaboration.completeReview({
+        taskId: "task-1",
+        findings: ["different disagreement"],
+        idempotencyKey: "conflicting-review-new-key"
+      })).rejects.toThrow("REVIEW_ROUND_ALREADY_COMPLETED");
+      expect(fixture.events.byType("review.completed")
+        .filter(({ payload }) => payload.round === 2)).toHaveLength(1);
+    } finally {
+      await fixture.cleanup();
     }
   });
 

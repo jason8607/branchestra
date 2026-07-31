@@ -870,6 +870,13 @@ export class GitManager {
       realpath(project.gitCommonDir),
       realpath(storedLead.pathRealpath)
     ]);
+    const identity = await this.readService.inspectRepository(
+      worktreePath,
+      worktreePath
+    );
+    if (identity.commonDirRealpath !== commonDir) {
+      throw new Error("REPOSITORY_IDENTITY_MISMATCH");
+    }
     return this.options.lock.withLock(commonDir, async () => {
       const priorOperation = this.options.journal.getByIdempotencyKey(
         input.idempotencyKey
@@ -877,7 +884,8 @@ export class GitManager {
       if (priorOperation !== null
         && (priorOperation.operationType !== "checkpoint.integrate.continue"
           || priorOperation.projectId !== input.projectId
-          || priorOperation.taskId !== input.taskId)) {
+          || priorOperation.taskId !== input.taskId
+          || priorOperation.repositoryCommonDirRealpath !== identity.commonDirRealpath)) {
         throw new Error("IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_INTENT");
       }
       let headBefore: string;
