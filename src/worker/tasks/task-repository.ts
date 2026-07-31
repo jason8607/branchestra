@@ -460,6 +460,38 @@ export class TaskRepository {
     return row ? mapCollaborationRound(row) : null;
   }
 
+  replayCollaborationCompletion(input: {
+    taskId: string;
+    idempotencyKey: string;
+    requestType: string;
+    requestHash: string;
+  }): TaskRecord | null {
+    const command = this.getServiceCommand(input.idempotencyKey);
+    if (command === null) return null;
+    this.assertServiceCommandIdentity(
+      command,
+      input.requestType,
+      input.requestHash
+    );
+    if (command.task_id !== input.taskId) {
+      throw new Error(`ENGINE_IDEMPOTENCY_KEY_CONFLICT:${input.idempotencyKey}`);
+    }
+    if (command.status === "pending") {
+      throw new Error(
+        `SERVICE_COMMAND_REQUIRES_RECONCILIATION:${input.idempotencyKey}`
+      );
+    }
+    if (command.status === "failed") {
+      this.throwServiceCommandFailure(command);
+    }
+    if (command.round === null || command.result_json === null) {
+      throw new Error(
+        `SERVICE_COMMAND_REQUIRES_RECONCILIATION:${input.idempotencyKey}`
+      );
+    }
+    return TaskRecordSchema.parse(JSON.parse(command.result_json));
+  }
+
   completeCollaborationRound(input: {
     taskId: string;
     round: number;
@@ -478,29 +510,15 @@ export class TaskRepository {
     event: Extract<RoomEvent, { type: "review.completed" }> | null;
   } {
     return this.db.transaction(() => {
+      const replay = this.replayCollaborationCompletion({
+        taskId: input.taskId,
+        idempotencyKey: input.idempotencyKey,
+        requestType: input.requestType,
+        requestHash: input.requestHash
+      });
+      if (replay) return { task: replay, event: null };
       const round = this.getCollaborationRound(input.taskId, input.round);
       if (!round) throw new Error("DURABLE_REVIEW_CONTEXT_NOT_FOUND");
-      const existingCommand = this.getServiceCommand(input.idempotencyKey);
-      if (existingCommand !== null) {
-        this.assertServiceCommandIdentity(
-          existingCommand,
-          input.requestType,
-          input.requestHash
-        );
-        if (existingCommand.task_id !== input.taskId) {
-          throw new Error(`ENGINE_IDEMPOTENCY_KEY_CONFLICT:${input.idempotencyKey}`);
-        }
-        if (existingCommand.status === "pending") {
-          throw new Error(
-            `SERVICE_COMMAND_REQUIRES_RECONCILIATION:${input.idempotencyKey}`
-          );
-        }
-        if (existingCommand.status === "failed") {
-          throw new Error(
-            `${existingCommand.error_code ?? "SERVICE_COMMAND_FAILED"}:${existingCommand.error_message ?? ""}`
-          );
-        }
-      }
       if (round.state === "completed") {
         if (round.findingsHash !== input.findingsHash || round.resultTask === null) {
           throw new Error(`REVIEW_ROUND_ALREADY_COMPLETED:${input.round}`);
@@ -589,9 +607,7 @@ export class TaskRepository {
           throw new Error(`SERVICE_COMMAND_REQUIRES_RECONCILIATION:${input.idempotencyKey}`);
         }
         if (existing.status === "failed") {
-          throw new Error(
-            `${existing.error_code ?? "SERVICE_COMMAND_FAILED"}:${existing.error_message ?? ""}`
-          );
+          this.throwServiceCommandFailure(existing);
         }
         return {
           kind: "replayed",
@@ -711,6 +727,14 @@ export class TaskRepository {
     if (command.request_type !== requestType || command.request_hash !== requestHash) {
       throw new Error(`ENGINE_IDEMPOTENCY_KEY_CONFLICT:${command.idempotency_key}`);
     }
+  }
+
+  private throwServiceCommandFailure(command: ServiceCommandRow): never {
+    throw new Error(
+      command.error_message
+      ?? command.error_code
+      ?? "SERVICE_COMMAND_FAILED"
+    );
   }
 
   private insertServiceCommand(input: {

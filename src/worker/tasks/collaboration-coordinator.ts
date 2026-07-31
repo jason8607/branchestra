@@ -84,6 +84,13 @@ export class CollaborationCoordinator {
       findings: input.findings
     });
     const tasks = this.options.repositories.tasks;
+    const replay = tasks.replayCollaborationCompletion({
+      taskId: input.taskId,
+      idempotencyKey: input.idempotencyKey,
+      requestType,
+      requestHash
+    });
+    if (replay) return replay;
     const task = tasks.getRequired(input.taskId);
     const completedAt = this.options.now();
     const completion = tasks.completeCollaborationRound({

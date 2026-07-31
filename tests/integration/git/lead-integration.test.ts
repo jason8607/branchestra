@@ -189,6 +189,106 @@ describe("Lead checkpoint integration", { timeout: 180_000 }, () => {
     }
   });
 
+  it("releases a reserved task after GitManager proves no integration intent exists", async () => {
+    const fixture = await createIntegrationFixture({ conflict: false });
+    const input = {
+      taskId: "task-1",
+      leadWorktree: fixture.lead,
+      selectedCheckpointIds: ["collaborator-cp-1"],
+      workerGeneration: GENERATION,
+      idempotencyKey: "integrate-pre-intent-failure"
+    };
+    try {
+      await fixture.writeLead("dirty.txt", "dirty\n");
+      const firstError = await fixture.integration.integrateSelectedCheckpoints(input)
+        .then(() => null, (error: unknown) => error);
+      expect(firstError).toMatchObject({
+        message: "LEAD_WORKTREE_NOT_CLEAN",
+        disposition: "safe_to_fail_service_command"
+      });
+      expect(fixture.journal.getByIdempotencyKey(input.idempotencyKey)).toBeNull();
+      expect(fixture.databaseFixture.db.prepare(`
+        SELECT status, error_message
+        FROM task_service_commands
+        WHERE idempotency_key = ?
+      `).get(input.idempotencyKey)).toEqual({
+        status: "failed",
+        error_message: "LEAD_WORKTREE_NOT_CLEAN"
+      });
+
+      const replayError = await fixture.integration.integrateSelectedCheckpoints(input)
+        .then(() => null, (error: unknown) => error);
+      expect(replayError).toMatchObject({ message: "LEAD_WORKTREE_NOT_CLEAN" });
+      expect(fixture.gitCommandCalls().filter(
+        ([command]) => command === "cherry-pick"
+      )).toHaveLength(0);
+      await expect(fixture.engine.cancel(
+        "task-1",
+        "user",
+        "cancel-after-pre-intent-failure"
+      )).resolves.toMatchObject({ state: "Cancelled" });
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it("keeps a reserved task locked when an integration intent makes Git state uncertain", async () => {
+    const fixture = await createIntegrationFixture({ conflict: false });
+    const input = {
+      taskId: "task-1",
+      leadWorktree: fixture.lead,
+      selectedCheckpointIds: ["collaborator-cp-1"],
+      workerGeneration: GENERATION,
+      idempotencyKey: "integrate-post-intent-failure"
+    };
+    try {
+      fixture.failAfterNextCherryPick();
+      const firstError = await fixture.integration.integrateSelectedCheckpoints(input)
+        .then(() => null, (error: unknown) => error);
+      expect(firstError).toMatchObject({
+        message: "CHECKPOINT_INTEGRATION_NEEDS_ATTENTION",
+        disposition: "reconciliation_required"
+      });
+      expect(fixture.journal.getByIdempotencyKey(input.idempotencyKey))
+        .toMatchObject({ status: "needs_attention" });
+      expect(fixture.databaseFixture.db.prepare(`
+        SELECT status, error_message
+        FROM task_service_commands
+        WHERE idempotency_key = ?
+      `).get(input.idempotencyKey)).toEqual({
+        status: "pending",
+        error_message: null
+      });
+      const current = fixture.tasks.getRequired("task-1");
+      expect(() => fixture.tasks.applyTransition({
+        previous: current,
+        next: {
+          ...current,
+          state: "CancelRequested",
+          version: current.version + 1
+        },
+        event: {
+          type: "task.transitioned",
+          payload: {
+            taskId: current.id,
+            from: current.state,
+            to: "CancelRequested",
+            version: current.version + 1
+          }
+        }
+      }, fixture.id())).toThrow("TASK_INTEGRATION_IN_PROGRESS");
+      await expect(fixture.integration.integrateSelectedCheckpoints(input))
+        .rejects.toThrow(
+          "SERVICE_COMMAND_REQUIRES_RECONCILIATION:integrate-post-intent-failure"
+        );
+      expect(fixture.gitCommandCalls().filter(
+        ([command]) => command === "cherry-pick"
+      )).toHaveLength(1);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   it("replays integration from its durable service command beyond the first event page", async () => {
     const fixture = await createIntegrationFixture({ conflict: false });
     try {

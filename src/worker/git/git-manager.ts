@@ -64,6 +64,21 @@ export interface IntegrateCheckpointInput {
   idempotencyKey: string;
 }
 
+export type IntegrationFailureDisposition =
+  | "safe_to_fail_service_command"
+  | "reconciliation_required";
+
+export class CheckpointIntegrationFailure extends Error {
+  constructor(
+    message: string,
+    readonly disposition: IntegrationFailureDisposition,
+    cause: unknown
+  ) {
+    super(message, { cause });
+    this.name = "CheckpointIntegrationFailure";
+  }
+}
+
 export interface GitManagerOptions {
   git: Pick<GitCommandRunner, "run" | "runBuffer">;
   readService?: GitReadService;
@@ -611,6 +626,28 @@ export class GitManager {
   }
 
   async integrateCheckpoint(
+    input: IntegrateCheckpointInput
+  ): Promise<IntegrateCheckpointResult> {
+    try {
+      return await this.integrateCheckpointAttempt(input);
+    } catch (error) {
+      let disposition: IntegrationFailureDisposition = "reconciliation_required";
+      try {
+        if (this.options.journal.getByIdempotencyKey(input.idempotencyKey) === null) {
+          disposition = "safe_to_fail_service_command";
+        }
+      } catch {
+        // Failure to prove the absence of durable intent must remain reconcilable.
+      }
+      throw new CheckpointIntegrationFailure(
+        error instanceof Error ? error.message : String(error),
+        disposition,
+        error
+      );
+    }
+  }
+
+  private async integrateCheckpointAttempt(
     input: IntegrateCheckpointInput
   ): Promise<IntegrateCheckpointResult> {
     assertSafeId(input.projectId, "PROJECT_ID_INVALID");

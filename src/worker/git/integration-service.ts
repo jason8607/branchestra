@@ -13,6 +13,7 @@ import type {
   GitManager,
   IntegrateCheckpointResult
 } from "./git-manager";
+import { CheckpointIntegrationFailure } from "./git-manager";
 
 export interface IntegrationServiceOptions {
   artifacts: Pick<GitArtifactRepository, "getCheckpoint" | "getWorktree">;
@@ -112,14 +113,28 @@ export class IntegrationService {
     if (reserved.kind === "replayed") {
       return this.parseResult(reserved.result);
     }
-    const result = await this.options.manager.integrateCheckpoint({
-      projectId: project.id,
-      taskId: task.id,
-      leadWorktree: storedLead,
-      checkpoints,
-      workerGeneration: input.workerGeneration,
-      idempotencyKey: input.idempotencyKey
-    });
+    let result: IntegrateCheckpointResult;
+    try {
+      result = await this.options.manager.integrateCheckpoint({
+        projectId: project.id,
+        taskId: task.id,
+        leadWorktree: storedLead,
+        checkpoints,
+        workerGeneration: input.workerGeneration,
+        idempotencyKey: input.idempotencyKey
+      });
+    } catch (error) {
+      if (error instanceof CheckpointIntegrationFailure
+        && error.disposition === "safe_to_fail_service_command") {
+        this.options.tasks.failServiceCommand(
+          input.idempotencyKey,
+          "INTEGRATION_PRE_INTENT_FAILURE",
+          error.message,
+          this.options.now()
+        );
+      }
+      throw error;
+    }
     const completedAt = this.options.now();
     const event = result.outcome === "integrated"
       ? {

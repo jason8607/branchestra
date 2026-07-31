@@ -343,6 +343,47 @@ describe("two-round collaboration", { timeout: 180_000 }, () => {
     }
   });
 
+  it("replays a completed round-one review before consulting the active round", async () => {
+    const fixture = await createCollaborationFixture();
+    try {
+      await fixture.engine.startApprovedTask("task-1", "start-historical-replay-lead");
+      await fixture.collaboration.requestRound({
+        taskId: "task-1",
+        purpose: "review",
+        idempotencyKey: "historical-round-1"
+      });
+      const completionInput = {
+        taskId: "task-1",
+        findings: ["round-one finding"],
+        idempotencyKey: "historical-review-1"
+      };
+      const roundOneResult = await fixture.collaboration.completeReview(completionInput);
+      await fixture.runLeadRevision();
+      await fixture.collaboration.requestRound({
+        taskId: "task-1",
+        purpose: "review",
+        idempotencyKey: "historical-round-2"
+      });
+      const activeBeforeReplay = fixture.tasks.getRequired("task-1");
+      const roundTwoBeforeReplay = fixture.tasks.getCollaborationRound("task-1", 2);
+      const completedEventsBeforeReplay = fixture.events.byType("review.completed");
+
+      await expect(fixture.collaboration.completeReview(completionInput))
+        .resolves.toEqual(roundOneResult);
+      expect(fixture.tasks.getRequired("task-1")).toEqual(activeBeforeReplay);
+      expect(fixture.tasks.getCollaborationRound("task-1", 2)).toEqual(roundTwoBeforeReplay);
+      expect(fixture.events.byType("review.completed")).toEqual(completedEventsBeforeReplay);
+      await expect(fixture.collaboration.completeReview({
+        ...completionInput,
+        findings: ["different round-one finding"]
+      })).rejects.toThrow(
+        "ENGINE_IDEMPOTENCY_KEY_CONFLICT:historical-review-1"
+      );
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   it("durably retains unresolved round-two findings instead of treating disagreement as success", async () => {
     const fixture = await createCollaborationFixture();
     try {

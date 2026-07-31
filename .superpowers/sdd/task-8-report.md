@@ -274,3 +274,97 @@ All real-Git suites used:
 ### Concerns
 
 None.
+
+## Fix round 2
+
+### Status
+
+Both Important review findings were fixed without starting Task 9.
+
+### TDD RED evidence
+
+The regressions were added before production changes and run with Node 24 and
+serialized real-Git execution.
+
+```text
+Historical round-one replay:
+1 failed — UNIQUE constraint failed: task_service_commands.idempotency_key
+
+Pre-intent failure disposition:
+1 failed — LEAD_WORKTREE_NOT_CLEAN had no typed safe disposition and the
+reserved service command remained pending.
+
+Post-intent failure disposition:
+1 failed — CHECKPOINT_INTEGRATION_NEEDS_ATTENTION had no typed reconciliation
+disposition.
+```
+
+### GREEN implementation
+
+- Added service-command-first collaboration completion replay. A matching
+  completed command returns its stored Task result before the coordinator reads
+  the current Task or round. Request identity, task identity, stored round, and
+  stored result are validated; a changed payload conflicts.
+- Kept the same replay check inside the repository transaction so a caller
+  cannot accidentally select the active round before a durable command result.
+- Added `CheckpointIntegrationFailure` with an explicit disposition derived
+  from GitManager-owned operation-journal evidence. A journal lookup failure
+  defaults to reconciliation; no error-message classification is used.
+- A reserved integration command is marked failed only when GitManager proves
+  that no operation intent exists. The single durable update releases the Task
+  integration lock and stores the original stable error message.
+- A present or unprovable operation intent leaves the command pending so replay
+  requires reconciliation and normal Task transitions remain blocked.
+- `failServiceCommand` now has a production caller in `IntegrationService`.
+
+### Verification
+
+```text
+Focused regressions:
+3 passed
+
+tests/integration/tasks/collaboration-rounds.test.ts:
+11 passed
+
+tests/integration/git/lead-integration.test.ts:
+11 passed
+
+tests/integration/tasks/task-execution-services.test.ts:
+1 passed
+
+Unit, serialized with the real-Git timeout:
+30 files passed; 324 tests passed
+
+Node typecheck:
+tsc -p tsconfig.node.json --noEmit — exit 0
+
+Renderer typecheck:
+tsc -p tsconfig.renderer.json --noEmit — exit 0
+
+Full ESLint:
+eslint . --max-warnings=0 — exit 0
+
+git diff --check — exit 0
+```
+
+All real-Git scopes used Node `24.18.0` with:
+
+```text
+--no-file-parallelism --maxWorkers=1 --testTimeout=180000
+```
+
+### Self-review
+
+- Confirmed a historical round-one same-key replay does not read or mutate
+  active round two and emits no new event.
+- Confirmed a changed historical payload conflicts.
+- Confirmed a dirty Lead before operation intent stores a failed service
+  command, preserves `LEAD_WORKTREE_NOT_CLEAN`, performs no cherry-pick, and
+  permits cancellation.
+- Confirmed a failure after a real cherry-pick creates a needs-attention
+  operation, retains the pending service command, blocks transitions, and does
+  not repeat the Git mutation on replay.
+
+### Concerns
+
+None.

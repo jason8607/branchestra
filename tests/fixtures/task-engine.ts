@@ -190,10 +190,16 @@ export async function createTaskEngineFixture(options: TaskEngineFixtureOptions)
   const journalRunner = new JournaledOperationRunner(base.repositories.operations);
   const gitArgvHistory: Array<readonly string[]> = [];
   const realGit = new GitCommandRunner();
+  let failAfterNextCherryPick = false;
   const trackedGit = {
     async run(cwd: string, argv: readonly string[]) {
       gitArgvHistory.push([...argv]);
-      return realGit.run(cwd, argv);
+      const result = await realGit.run(cwd, argv);
+      if (failAfterNextCherryPick && argv[0] === "cherry-pick") {
+        failAfterNextCherryPick = false;
+        throw new Error("INJECTED_POST_CHERRY_PICK_FAILURE");
+      }
+      return result;
     },
     async runBuffer(cwd: string, argv: readonly string[]) {
       gitArgvHistory.push([...argv]);
@@ -292,6 +298,9 @@ export async function createTaskEngineFixture(options: TaskEngineFixtureOptions)
     providerRequests: () => [...providerRequests],
     gitMutationCalls: () => gitArgvHistory.map((argv) => argv.join(" ")),
     gitCommandCalls: () => gitArgvHistory.map((argv) => [...argv]),
+    failAfterNextCherryPick() {
+      failAfterNextCherryPick = true;
+    },
     appendNoiseEvents(count: number) {
       const createdAt = base.project.createdAt;
       for (let index = 0; index < count; index += 1) {
