@@ -17,8 +17,8 @@ describe("GitCommandRunner", () => {
 
     expect(execFile).toHaveBeenCalledWith("/usr/bin/git", [
       "--no-pager",
-      "--no-lazy-fetch",
       "--no-replace-objects",
+      "-c", "protocol.allow=never",
       "-c", "user.name=Branchestra",
       "-c", "user.email=branchestra@localhost",
       "-c", "core.hooksPath=/dev/null",
@@ -34,6 +34,7 @@ describe("GitCommandRunner", () => {
         GIT_TERMINAL_PROMPT: "0",
         GIT_CONFIG_NOSYSTEM: "1",
         GIT_CONFIG_GLOBAL: "/dev/null",
+        GIT_ALLOW_PROTOCOL: "",
         GIT_OPTIONAL_LOCKS: "0"
       },
       encoding: "utf8",

@@ -188,12 +188,16 @@ describe("GitReadService read-only queries", () => {
     const parent = await mkdtemp(join(tmpdir(), "branchestra-partial-"));
     extraRoots.push(parent);
     const clone = join(parent, "partial");
-    await new GitCommandRunner().run(parent, [
+    execFileSync("/usr/bin/git", [
+      "-c", "protocol.file.allow=always",
+      "-C", parent,
       "clone", "--no-local", "--no-checkout", "--filter=blob:none", `file://${source.root}`, clone
-    ]);
+    ], {
+      env: { PATH: "/usr/bin:/bin", LANG: "C", LC_ALL: "C", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" }
+    });
     const blobOid = (await source.run(["rev-parse", `${source.initialOid}:README.md`])).stdout.trim();
     expect(() => execFileSync("/usr/bin/git", [
-      "--no-lazy-fetch", "-C", clone, "cat-file", "-e", blobOid
+      "-c", "protocol.allow=never", "-C", clone, "cat-file", "-e", blobOid
     ])).toThrow();
 
     const sentinel = join(parent, "PROMISOR_CONTACTED");
