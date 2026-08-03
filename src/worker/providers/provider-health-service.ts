@@ -1,5 +1,5 @@
 import type { ProviderCapabilities, ProviderHealth, ProviderId } from "../../shared/contracts/provider";
-import { PUBLIC_PROVIDER_RELEASE_POLICY } from "../../shared/config/provider-release-policy";
+import { EFFECTIVE_PROVIDER_POLICY, type EffectiveProviderPolicy } from "../../shared/config/effective-provider-policy";
 import type { ProviderExecPort } from "./provider-exec-port";
 import { probeProviderAuth } from "./auth-probes";
 import { discoverExternalExecutable } from "./executable-discovery";
@@ -24,6 +24,7 @@ export interface ProviderHealthDependencies {
     resourcesRootRealpath: string;
   };
   validateCodexSubscriptionConfigLock(input: { resourcesRootRealpath: string; expectedCliVersion: string }): Promise<LockDecision>;
+  policy?: EffectiveProviderPolicy;
   now?: () => string;
 }
 
@@ -51,17 +52,17 @@ export class ProviderHealthService {
   }
 
   private async refresh(provider: ProviderId, selectedPath?: string): Promise<ProviderHealth> {
+    const policy = this.deps.policy ?? EFFECTIVE_PROVIDER_POLICY;
     const saved = this.deps.repository.getInstallation(provider);
     const detected = await discoverExternalExecutable({
       provider, selectedPath: selectedPath ?? saved?.executableRealpath ?? null,
       homeDirectory: this.deps.host.homeDirectory, architecture: this.deps.host.architecture, runner: this.deps.runner,
     });
     if (!detected) return this.health(provider, "missing", null, null, "Choose a supported official CLI executable.");
-    if (provider === "claude" && !PUBLIC_PROVIDER_RELEASE_POLICY.claudeSubscription.enabled) {
+    if (provider === "claude" && !policy.claudeSubscription.enabled) {
       return this.persist(detected, "policy_disabled", "Public Claude runs require written Anthropic approval.");
     }
-    if (provider === "codex" && (!PUBLIC_PROVIDER_RELEASE_POLICY.codexSubscription.enabled
-      || PUBLIC_PROVIDER_RELEASE_POLICY.codexSubscription.policyStatus !== "allowed")) {
+    if (provider === "codex" && !policy.codexSubscription.enabled) {
       return this.persist(detected, "policy_disabled", "Public Codex runs require current arm64 and x64 enforcement evidence.");
     }
     const env = buildProviderEnvironment({

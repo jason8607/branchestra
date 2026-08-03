@@ -20,4 +20,17 @@ describe("ProviderHealthService", () => {
     expect(health.repairAction).toContain("written Anthropic approval");
     harness.db.close();
   });
+
+  it("permits an exact-version authenticated Claude CLI in a private-local build", async () => {
+    const harness = await createProviderTestHarness({
+      provider: "claude",
+      versionOutput: "2.1.206\n",
+      authOutput: JSON.stringify({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
+      privateLocalProviders: true,
+    });
+    const health = await harness.service.selectExecutable("claude", harness.executablePath);
+    expect(health.state).toBe("ready");
+    expect(health.capabilities).not.toBeNull();
+    harness.db.close();
+  });
 });

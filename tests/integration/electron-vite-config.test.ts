@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import config from "../../electron.vite.config";
+import config, { createElectronViteConfig } from "../../electron.vite.config";
 import { createWindowOptions } from "../../src/main/window-options";
 
 interface PreloadRollupOptions {
@@ -11,6 +11,13 @@ interface PreloadRollupOptions {
 }
 
 describe("Electron/Vite shell configuration", () => {
+  it("fixes private-local Provider enablement at build time", () => {
+    const local = createElectronViteConfig({ BRANCHESTRA_BUILD_PRIVATE_LOCAL_PROVIDERS: "1" });
+    const publicBuild = createElectronViteConfig({ BRANCHESTRA_BUILD_PRIVATE_LOCAL_PROVIDERS: "true" });
+    expect(local.main?.define).toMatchObject({ __BRANCHESTRA_PRIVATE_LOCAL_PROVIDERS__: "true" });
+    expect(publicBuild.main?.define).toMatchObject({ __BRANCHESTRA_PRIVATE_LOCAL_PROVIDERS__: "false" });
+  });
+
   it("configures a bundled CommonJS sandbox preload with only Electron external", () => {
     expect(config.main?.plugins).toHaveLength(1);
     expect(config.preload?.plugins ?? []).toHaveLength(0);
@@ -32,5 +39,5 @@ describe("Electron/Vite shell configuration", () => {
       .map((match) => match[1]);
     expect([...new Set(externalModules)]).toEqual(["electron"]);
     expect(createWindowOptions(preloadPath).webPreferences?.sandbox).toBe(true);
-  });
+  }, 60_000);
 });

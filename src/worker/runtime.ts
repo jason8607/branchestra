@@ -40,7 +40,7 @@ import { execFileNoShell } from "./process/exec-file";
 import { ProcessIdentityProbe } from "./process/process-identity";
 import { ProviderProcessSupervisor } from "./process/provider-process-supervisor";
 import { validateCodexSubscriptionConfigLock } from "../shared/security/codex-config-lock";
-import { PUBLIC_PROVIDER_RELEASE_POLICY } from "../shared/config/provider-release-policy";
+import { EFFECTIVE_PROVIDER_POLICY } from "../shared/config/effective-provider-policy";
 import { CLAUDE_CAPABILITIES } from "../provider-runner/claude-runtime";
 import { CODEX_CAPABILITIES } from "../provider-runner/codex-runtime";
 import { ReadOnlyToolService } from "./tools/read-only-tool-service";
@@ -431,11 +431,8 @@ export async function startWorker(options: WorkerStartOptions): Promise<WorkerRu
       });
       return new RegistryTaskProvider(createProviderRegistry({
         policy: {
-          claudeSubscription: { enabled: PUBLIC_PROVIDER_RELEASE_POLICY.claudeSubscription.enabled },
-          codexSubscription: {
-            enabled: PUBLIC_PROVIDER_RELEASE_POLICY.codexSubscription.enabled
-              && PUBLIC_PROVIDER_RELEASE_POLICY.codexSubscription.policyStatus === "allowed",
-          },
+          claudeSubscription: { enabled: EFFECTIVE_PROVIDER_POLICY.claudeSubscription.enabled },
+          codexSubscription: { enabled: EFFECTIVE_PROVIDER_POLICY.codexSubscription.enabled },
         },
         createClaudeAdapter: () => adapter("claude"),
         createCodexAdapter: () => adapter("codex"),

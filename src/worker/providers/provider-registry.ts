@@ -1,4 +1,4 @@
-import { PUBLIC_PROVIDER_RELEASE_POLICY } from "../../shared/config/provider-release-policy";
+import { EFFECTIVE_PROVIDER_POLICY } from "../../shared/config/effective-provider-policy";
 import type { ProviderId } from "../../shared/contracts/provider";
 import type { ProviderAdapter } from "./provider-adapter";
 
@@ -20,11 +20,8 @@ export interface ProviderRegistry {
 
 export function createProviderRegistry(input?: ProviderRegistryInput): ProviderRegistry {
   const policy: RegistryPolicy = input?.policy ?? {
-    claudeSubscription: { enabled: PUBLIC_PROVIDER_RELEASE_POLICY.claudeSubscription.enabled },
-    codexSubscription: {
-      enabled: PUBLIC_PROVIDER_RELEASE_POLICY.codexSubscription.enabled
-        && PUBLIC_PROVIDER_RELEASE_POLICY.codexSubscription.policyStatus === "allowed",
-    },
+    claudeSubscription: { enabled: EFFECTIVE_PROVIDER_POLICY.claudeSubscription.enabled },
+    codexSubscription: { enabled: EFFECTIVE_PROVIDER_POLICY.codexSubscription.enabled },
   };
   const adapters = new Map<ProviderId, ProviderAdapter>();
   if (input && policy.claudeSubscription.enabled) adapters.set("claude", input.createClaudeAdapter());
