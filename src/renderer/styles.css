@@ -474,6 +474,18 @@ h3 {
   font-weight: 650;
 }
 
+.event-actor--claude {
+  color: var(--agent-claude);
+}
+
+.event-actor--codex {
+  color: var(--agent-codex);
+}
+
+.event-actor--system {
+  color: var(--muted);
+}
+
 .event-sequence {
   color: var(--amber);
   font-family: var(--utility);

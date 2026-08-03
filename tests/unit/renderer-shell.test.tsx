@@ -598,6 +598,38 @@ describe("renderer shell", () => {
     expect(html).toContain(">你<");
   });
 
+  it("renders a persisted Agent reply with the Provider identity and reply text", () => {
+    const event: RoomEvent = {
+      id: "30000000-0000-4000-8000-000000000099",
+      roomId: ROOM_ID,
+      roomSeq: 43,
+      type: "agent.run",
+      actor: "codex",
+      payload: {
+        run: {
+          id: "run-codex-1",
+          taskId: "task-codex-1",
+          provider: "codex",
+          role: "lead",
+          providerSessionId: "thread-codex-1",
+          contextVersion: 1,
+          contextHash: `sha256:${"a".repeat(64)}`,
+          state: "running",
+          startedAt: CREATED_AT,
+          finishedAt: null
+        },
+        event: { type: "assistant.message", text: "測試成功，Codex 已正常回應。" }
+      },
+      createdAt: CREATED_AT
+    };
+    const html = renderToStaticMarkup(<Timeline events={[event]} />);
+
+    expect(html).toContain("aria-label=\"發言者：Codex\"");
+    expect(html).toContain(">Codex<");
+    expect(html).toContain("測試成功，Codex 已正常回應。");
+    expect(html).not.toContain("代理執行狀態已更新");
+  });
+
   it("hydrates once on mount and disposes the store on unmount", () => {
     const store = preloadedTimelineStore();
     const view = render(<App store={store} />);
