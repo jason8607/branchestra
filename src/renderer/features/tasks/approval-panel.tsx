@@ -18,11 +18,13 @@ export function ApprovalPanel(props: {
     }
   });
   return (
-    <section aria-label="Task scope approval">
-      <h3>Requested scope</h3>
+    <section className="task-panel" aria-label="任務範圍核准">
+      <h3>要求的執行範圍</h3>
       <p>{pending.scope.commandClasses.join(", ")}</p>
-      <button type="button" onClick={() => void decide("approved")}>Approve task scope</button>
-      <button type="button" onClick={() => void decide("rejected")}>Reject task scope</button>
+      <div className="button-row">
+        <button type="button" onClick={() => void decide("approved")}>核准任務範圍</button>
+        <button className="danger-button" type="button" onClick={() => void decide("rejected")}>拒絕</button>
+      </div>
     </section>
   );
 }

@@ -27,12 +27,12 @@ test("worker restart replays durable state into Interrupted without replaying si
     });
     try {
       const resumed = await second.firstWindow();
-      await expect(resumed.getByTestId("task-state")).toHaveText("Interrupted", { timeout: 15_000 });
-      await resumed.getByRole("button", { name: "Preview recovery" }).click();
-      await expect(resumed.getByText("No side effects replayed")).toBeVisible();
-      await resumed.getByRole("button", { name: "Resume recorded phase" }).click();
-      await resumed.getByRole("button", { name: "Stop task" }).click();
-      await expect(resumed.getByTestId("task-state")).toHaveText("Cancelled");
+      await expect(resumed.getByTestId("task-state")).toHaveText("已中斷", { timeout: 15_000 });
+      await resumed.getByRole("button", { name: "預覽復原方案" }).click();
+      await expect(resumed.getByText("尚未重播任何副作用")).toBeVisible();
+      await resumed.getByRole("button", { name: "從記錄階段繼續" }).click();
+      await resumed.getByRole("button", { name: "停止任務" }).click();
+      await expect(resumed.getByTestId("task-state")).toHaveText("已取消");
       expect(second.readManagedWorktreeFile("partial.txt")).toBe("keep after restart\n");
       expect(await second.managedBranchExists()).toBe(true);
     } finally {

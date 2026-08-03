@@ -65,7 +65,7 @@ export async function launchBranchestraE2E(
     firstWindow: () => app.firstWindow(),
     async chooseRepository() {
       const page = await app.firstWindow();
-      await page.getByRole("button", { name: "Add Project" }).click();
+      await page.getByRole("button", { name: "加入專案" }).click();
     },
     readManagedWorktreeFile(relativePath) {
       const root = join(userDataDir, "managed-worktrees");
@@ -119,11 +119,11 @@ export async function createAndApproveTask(
   await app.chooseRepository();
   await page.getByTestId("room-title-input").fill("Task room");
   await page.getByTestId("create-room").click();
-  await page.getByLabel("Message").fill(message);
-  await page.getByRole("button", { name: "Send message" }).click();
-  await page.getByRole("button", { name: "Open task" }).first().click();
+  await page.getByLabel("訊息").fill(message);
+  await page.getByRole("button", { name: "傳送訊息" }).click();
+  await page.getByRole("button", { name: "查看任務" }).first().click();
   await page.getByTestId("task-state").waitFor({ state: "visible", timeout: 5_000 }).catch(async (error) => {
     throw new Error(`Task Inspector unavailable:\n${await page.locator("body").innerText()}`, { cause: error });
   });
-  await page.getByRole("button", { name: "Approve task scope" }).click();
+  await page.getByRole("button", { name: "核准任務範圍" }).click();
 }

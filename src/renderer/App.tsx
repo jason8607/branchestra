@@ -51,8 +51,8 @@ export function App({ store }: { store: TimelineStore }): React.JSX.Element {
       />
       <section className="timeline-column">
         <header className="timeline-header">
-          <p className="section-kicker">{room ? room.title : "No room selected"}</p>
-          <h1>Shared Timeline</h1>
+          <p className="section-kicker">{room ? room.title : "尚未選擇房間"}</p>
+          <h1>{room ? "共享時間軸" : "開始使用"}</h1>
           {state.error ? <p className="connection-error" role="alert">{state.error}</p> : null}
         </header>
         {state.snapshot.projects.length === 0
@@ -76,7 +76,7 @@ export function App({ store }: { store: TimelineStore }): React.JSX.Element {
         taskError={taskInspector.error}
         requestTask={taskInspector.request}
         settings={<details>
-          <summary>Settings</summary>
+          <summary>設定與資料</summary>
           <DiagnosticsPanel
             pending={diagnosticPending}
             onExport={() => {
@@ -84,10 +84,10 @@ export function App({ store }: { store: TimelineStore }): React.JSX.Element {
               setDiagnosticStatus(null);
               void store.exportDiagnostics().then((result) => {
                 setDiagnosticStatus("cancelled" in result
-                  ? "Diagnostic export cancelled"
-                  : `Diagnostic bundle exported (${result.bytes} bytes)`);
+                  ? "已取消匯出診斷資料"
+                  : `診斷資料已匯出（${result.bytes} 位元組）`);
               }).catch((error: unknown) => {
-                setDiagnosticStatus(error instanceof Error ? error.message : "Diagnostic export failed");
+                setDiagnosticStatus(error instanceof Error ? error.message : "無法匯出診斷資料");
               }).finally(() => setDiagnosticPending(false));
             }}
           />
@@ -111,10 +111,10 @@ export function App({ store }: { store: TimelineStore }): React.JSX.Element {
               void store.previewRoomCleanup(room.id).then((preview) => {
                 setCleanupPreview(preview);
                 if (preview.activeTaskCount > 0) {
-                  setCleanupStatus("Room metadata cannot be removed while it contains tasks.");
+                  setCleanupStatus("房間內仍有任務，無法移除本機資料。");
                 }
               }).catch((error: unknown) => {
-                setCleanupStatus(error instanceof Error ? error.message : "Unable to preview room removal");
+                setCleanupStatus(error instanceof Error ? error.message : "無法預覽房間資料移除內容");
               }).finally(() => setCleanupPending(false));
             }}
             onRemoveRoom={() => {
@@ -125,9 +125,9 @@ export function App({ store }: { store: TimelineStore }): React.JSX.Element {
                 .then(() => {
                   setCleanupPreview(null);
                   setCleanupConfirmation("");
-                  setCleanupStatus("Room metadata removed; filesystem backups are the only recovery source");
+                  setCleanupStatus("房間的本機資料已移除；之後只能從檔案系統備份復原");
                 }).catch((error: unknown) => {
-                  setCleanupStatus(error instanceof Error ? error.message : "Room metadata removal failed");
+                  setCleanupStatus(error instanceof Error ? error.message : "無法移除房間的本機資料");
                 }).finally(() => setCleanupPending(false));
             }}
             onPreviewWorktree={(worktreeId) => {
@@ -136,7 +136,7 @@ export function App({ store }: { store: TimelineStore }): React.JSX.Element {
               setAllowDirtyArchive(false);
               void store.previewWorktreeCleanup(worktreeId).then(setWorktreePreview)
                 .catch((error: unknown) => {
-                  setCleanupStatus(error instanceof Error ? error.message : "Unable to preview worktree archive");
+                  setCleanupStatus(error instanceof Error ? error.message : "無法預覽 worktree 封存內容");
                 }).finally(() => setCleanupPending(false));
             }}
             onAllowDirtyArchive={setAllowDirtyArchive}
@@ -148,9 +148,9 @@ export function App({ store }: { store: TimelineStore }): React.JSX.Element {
                 .then((recoveryPath) => {
                   setWorktreePreview(null);
                   setAllowDirtyArchive(false);
-                  setCleanupStatus(`Worktree archived at ${recoveryPath}`);
+                  setCleanupStatus(`Worktree 已封存至 ${recoveryPath}`);
                 }).catch((error: unknown) => {
-                  setCleanupStatus(error instanceof Error ? error.message : "Worktree archive failed");
+                  setCleanupStatus(error instanceof Error ? error.message : "無法封存 worktree");
                 }).finally(() => setCleanupPending(false));
             }}
             onProjectConfirmation={setProjectConfirmation}
@@ -161,7 +161,7 @@ export function App({ store }: { store: TimelineStore }): React.JSX.Element {
               setProjectConfirmation("");
               void store.previewProjectCleanup(project.id).then(setProjectPreview)
                 .catch((error: unknown) => {
-                  setCleanupStatus(error instanceof Error ? error.message : "Unable to preview project removal");
+                  setCleanupStatus(error instanceof Error ? error.message : "無法預覽專案資料移除內容");
                 }).finally(() => setCleanupPending(false));
             }}
             onRemoveProject={() => {
@@ -172,9 +172,9 @@ export function App({ store }: { store: TimelineStore }): React.JSX.Element {
                 .then(() => {
                   setProjectPreview(null);
                   setProjectConfirmation("");
-                  setCleanupStatus("Project metadata removed; the Git repository was not deleted");
+                  setCleanupStatus("專案的本機資料已移除；Git 儲存庫未被刪除");
                 }).catch((error: unknown) => {
-                  setCleanupStatus(error instanceof Error ? error.message : "Project metadata removal failed");
+                  setCleanupStatus(error instanceof Error ? error.message : "無法移除專案的本機資料");
                 }).finally(() => setCleanupPending(false));
             }}
           />

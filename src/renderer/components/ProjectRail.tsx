@@ -12,12 +12,20 @@ export function ProjectRail(props: {
   const [creationError, setCreationError] = useState<string | null>(null);
 
   return (
-    <nav className="project-rail" data-testid="project-rail" aria-label="Project and room navigation">
+    <nav className="project-rail" data-testid="project-rail" aria-label="專案與房間導覽">
       <header>
-        <p className="brand-mark">Branchestra</p>
+        <div className="brand-lockup">
+          <span className="brand-glyph" aria-hidden="true">B</span>
+          <div>
+            <p className="brand-mark">Branchestra</p>
+            <p className="brand-subtitle">本機代理工作台</p>
+          </div>
+        </div>
         <div className="rail-heading">
-          <h2>Projects</h2>
-          <button type="button" onClick={props.onAddProject}>Add Project</button>
+          <h2>專案</h2>
+          <button className="quiet-button" type="button" onClick={props.onAddProject}>
+            <span aria-hidden="true">＋</span> 加入專案
+          </button>
         </div>
       </header>
       {props.state.snapshot.projects.map((project) => {
@@ -26,7 +34,7 @@ export function ProjectRail(props: {
         return (
           <section className="project-group" key={project.id}>
             <h3>{project.displayName}</h3>
-            <p className="section-label">Rooms</p>
+            <p className="section-label">房間</p>
             {rooms.length > 0 ? (
               <ul className="room-list">
                 {rooms.map((room) => (
@@ -42,7 +50,7 @@ export function ProjectRail(props: {
                   </li>
                 ))}
               </ul>
-            ) : <p className="empty-copy">Create a room to start a timeline.</p>}
+            ) : <p className="empty-copy">建立一個房間，開始整理這個專案的工作。</p>}
             {isSelected ? <form
               className="room-form"
               onSubmit={(event) => {
@@ -56,17 +64,17 @@ export function ProjectRail(props: {
                   .then(() => setRoomTitle((current) => (
                     current === submittedDraft ? "" : current
                   )))
-                  .catch(() => setCreationError("Room was not created. Check the connection and try again."))
+                  .catch(() => setCreationError("無法建立房間，請檢查連線後再試一次。"))
                   .finally(() => setCreatingRoom(false));
               }}
             >
-              <label htmlFor={`room-title-${project.id}`}>New room title</label>
+              <label htmlFor={`room-title-${project.id}`}>新房間名稱</label>
               <input
                 id={`room-title-${project.id}`}
                 data-testid="room-title-input"
                 value={roomTitle}
                 onChange={(event) => setRoomTitle(event.currentTarget.value)}
-                placeholder="Room name"
+                placeholder="例如：首頁改版"
                 aria-describedby={creationError ? `room-creation-error-${project.id}` : undefined}
               />
               <button
@@ -74,7 +82,7 @@ export function ProjectRail(props: {
                 data-testid="create-room"
                 disabled={creatingRoom || roomTitle.trim().length === 0}
               >
-                {creatingRoom ? "Creating…" : "Create room"}
+                {creatingRoom ? "建立中…" : "建立房間"}
               </button>
               {creationError ? (
                 <p id={`room-creation-error-${project.id}`} role="alert">{creationError}</p>

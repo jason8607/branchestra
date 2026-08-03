@@ -17,7 +17,7 @@ test("adds a Git project, persists isolated rooms/messages, and restores them af
     });
     let page = await application.firstWindow();
 
-    await page.getByRole("button", { name: "Add Project" }).click();
+    await page.getByRole("button", { name: "加入專案" }).click();
     await expect(page.getByTestId("project-rail")).toContainText(basename(repository.root));
 
     await page.getByTestId("room-title-input").fill("Architecture");

@@ -1,17 +1,23 @@
 import React from "react";
 import type { ProviderHealth, ProviderId } from "../../../shared/contracts/provider";
+import { PROVIDER_STATE_LABEL, providerGuidance } from "../../locale/zh-TW";
 
 export function ProviderHealthCard(props: { health: ProviderHealth; onPick(provider: ProviderId): void }): React.JSX.Element {
   const name = props.health.provider === "claude" ? "Claude" : "Codex";
-  return <section aria-label={`${name} health`}>
-    <h3>{name}</h3>
-    <p>{props.health.authLabel}</p>
-    <dl>
-      <dt>CLI</dt><dd>{props.health.executableRealpath ?? "Not found"}</dd>
-      <dt>Version</dt><dd>{props.health.cliVersion ?? "Unavailable"}</dd>
-      <dt>Status</dt><dd>{props.health.state.replaceAll("_", " ")}</dd>
+  const guidance = providerGuidance(props.health);
+  return <section className="provider-card" aria-label={`${name} 狀態`}>
+    <header>
+      <span className={`provider-monogram provider-${props.health.provider}`} aria-hidden="true">
+        {props.health.provider === "claude" ? "C" : "X"}
+      </span>
+      <div><h3>{name}</h3><p>僅限訂閱帳號</p></div>
+      <span className={`status-pill status-${props.health.state}`}>{PROVIDER_STATE_LABEL[props.health.state]}</span>
+    </header>
+    <dl className="provider-facts">
+      <div><dt>CLI</dt><dd className="path-value">{props.health.executableRealpath ?? "尚未找到"}</dd></div>
+      <div><dt>版本</dt><dd>{props.health.cliVersion ?? "無法取得"}</dd></div>
     </dl>
-    {props.health.repairAction ? <p role="status">{props.health.repairAction}</p> : null}
-    <button type="button" onClick={() => props.onPick(props.health.provider)}>Choose {name} CLI</button>
+    {guidance ? <p className="provider-guidance" role="status">{guidance}</p> : null}
+    <button type="button" onClick={() => props.onPick(props.health.provider)}>選擇 {name} CLI</button>
   </section>;
 }

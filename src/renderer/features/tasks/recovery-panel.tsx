@@ -7,7 +7,7 @@ export function RecoveryPanel(props: {
   request(command: TaskWorkerCommand): Promise<TaskInspectorModel>;
 }): React.JSX.Element | null {
   if (props.model.task.state === "Interrupted" && !props.model.recovery) {
-    return <button type="button" onClick={() => void props.request({ type: "task.recovery.preview", payload: { taskId: props.model.task.id } })}>Preview recovery</button>;
+    return <button type="button" onClick={() => void props.request({ type: "task.recovery.preview", payload: { taskId: props.model.task.id } })}>預覽復原方案</button>;
   }
   const recovery = props.model.recovery;
   if (!recovery) return null;
@@ -21,13 +21,13 @@ export function RecoveryPanel(props: {
     }
   });
   return (
-    <section aria-label="Task recovery">
-      <h3>Recovery</h3>
-      <p>No side effects replayed</p>
+    <section className="task-panel" aria-label="任務復原">
+      <h3>復原</h3>
+      <p>尚未重播任何副作用</p>
       {recovery.operations.map((operation) => <p key={operation.operationId}>{operation.operationType}: {operation.outcome}</p>)}
-      <button type="button" onClick={() => void resolve("resume_recorded_phase")}>Resume recorded phase</button>
-      <button type="button" onClick={() => void resolve("keep_observed_state")}>Keep observed state</button>
-      <button type="button" onClick={() => void resolve("cancel_and_retain")}>Cancel and retain</button>
+      <button type="button" onClick={() => void resolve("resume_recorded_phase")}>從記錄階段繼續</button>
+      <button type="button" onClick={() => void resolve("keep_observed_state")}>保留目前狀態</button>
+      <button className="danger-button" type="button" onClick={() => void resolve("cancel_and_retain")}>取消並保留檔案</button>
     </section>
   );
 }

@@ -13,10 +13,10 @@ test("exports an opt-in redacted diagnostic bundle to a Main-selected destinatio
   });
   try {
     const page = await app.firstWindow();
-    await page.getByText("Settings").click();
-    await expect(page.getByText("It excludes messages, source files, diffs, raw Provider events, environment values, and authentication output.")).toBeVisible();
-    await page.getByRole("button", { name: "Export diagnostics" }).click();
-    await expect(page.getByText(/Diagnostic bundle exported \(\d+ bytes\)/)).toBeVisible();
+    await page.getByText("設定與資料").click();
+    await expect(page.getByText(/不包含訊息、原始碼、差異內容、原始代理事件/)).toBeVisible();
+    await page.getByRole("button", { name: "匯出診斷資料" }).click();
+    await expect(page.getByText(/診斷資料已匯出（\d+ 位元組）/)).toBeVisible();
 
     const destination = join(app.userDataDir, "branchestra-diagnostics.json.gz");
     expect(statSync(destination).mode & 0o777).toBe(0o600);

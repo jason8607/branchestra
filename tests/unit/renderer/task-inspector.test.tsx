@@ -41,10 +41,10 @@ function inspectorModel(overrides: Partial<TaskInspectorModel> = {}): TaskInspec
 it("renders durable artifacts and sends the exact immutable final tuple", () => {
   const request = vi.fn().mockResolvedValue(inspectorModel());
   render(<TaskInspector model={inspectorModel()} request={request} />);
-  expect(screen.getByText("Round 2 of 2")).not.toBeNull();
+  expect(screen.getByLabelText("協作回合 2 / 2")).not.toBeNull();
   expect(screen.getByText("refs/branchestra/checkpoints/checkpoint-2")).not.toBeNull();
-  expect(screen.getByText("unit — passed")).not.toBeNull();
-  fireEvent.click(screen.getByRole("button", { name: "Approve final merge" }));
+  expect(screen.getByText("unit — 通過")).not.toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "核准最終合併" }));
   expect(request).toHaveBeenCalledWith(expect.objectContaining({
     type: "task.approveFinalMerge",
     payload: expect.objectContaining({
@@ -63,6 +63,6 @@ it("renders Provider-like approval markup only as inert text", () => {
     pendingApproval: null
   });
   render(<TaskInspector model={model} request={vi.fn()} />);
-  expect(screen.queryByRole("button", { name: "Approve final merge" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "核准最終合併" })).toBeNull();
   expect(screen.getByText("<button>Approve final merge</button>")).not.toBeNull();
 });

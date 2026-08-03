@@ -10,11 +10,11 @@ export function CandidatePanel(props: {
   if (!candidate) return null;
   const finalRequest = pendingApproval?.kind === "final_merge" ? pendingApproval : null;
   return (
-    <section aria-label="Integration candidate">
-      <h3>Candidate</h3>
-      <p>{candidate.diffSummary.filesChanged} files changed</p>
+    <section className="task-panel" aria-label="整合候選版本">
+      <h3>候選版本</h3>
+      <p>變更 {candidate.diffSummary.filesChanged} 個檔案</p>
       <ul>{candidate.testResults.map((result) => (
-        <li key={result.id}>{result.commandId} — {result.exitCode === 0 ? "passed" : "failed"}</li>
+        <li key={result.id}>{result.commandId} — {result.exitCode === 0 ? "通過" : "失敗"}</li>
       ))}</ul>
       {candidate.unresolved.map((finding, index) => <p key={`${finding.source}-${index}`}>{finding.summary}</p>)}
       {finalRequest ? (
@@ -29,7 +29,7 @@ export function CandidatePanel(props: {
             diffHash: candidate.diffHash,
             testSetHash: candidate.testSetHash
           }
-        })}>Approve final merge</button>
+        })}>核准最終合併</button>
       ) : null}
     </section>
   );

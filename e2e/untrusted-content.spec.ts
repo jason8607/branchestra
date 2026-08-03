@@ -12,11 +12,11 @@ test("untrusted timeline content cannot navigate, open windows, or fabricate con
     await page.getByTestId("room-title-input").fill("Security room");
     await page.getByTestId("create-room").click();
     const malicious = "<img src=x onerror=alert(1)> <form><input autofocus></form> [unsafe](javascript:alert(1)) [safe](https://example.com/path)";
-    await page.getByLabel("Message").fill(malicious);
-    await page.getByRole("button", { name: "Send message" }).click();
+    await page.getByLabel("訊息").fill(malicious);
+    await page.getByRole("button", { name: "傳送訊息" }).click();
 
     const timeline = page.getByTestId("shared-timeline");
-    await expect(page.getByRole("button", { name: "Approve final merge" })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "核准最終合併" })).toHaveCount(0);
     await expect(timeline).toContainText("onerror=alert(1)");
     await expect(timeline.locator("img, form, input, iframe, object, embed, svg")).toHaveCount(0);
     await expect(timeline.locator('a[href^="javascript:"]')).toHaveCount(0);

@@ -3,13 +3,7 @@ import type { Project, Room, TaskInspectorModel } from "../../shared/contracts/d
 import type { TaskWorkerCommand } from "../../shared/contracts/protocol";
 import { TaskInspector } from "../features/tasks/task-inspector";
 import type { TimelineState } from "../state/timeline-store";
-
-const CONNECTION_LABEL: Record<TimelineState["connection"], string> = {
-  bootstrapping: "Starting",
-  ready: "Ready",
-  reconnecting: "Reconnecting",
-  error: "Needs attention"
-};
+import { CONNECTION_LABEL } from "../locale/zh-TW";
 
 export function Inspector(props: {
   project: Project | null;
@@ -24,33 +18,33 @@ export function Inspector(props: {
   return (
     <aside className="room-inspector" data-testid="room-inspector" aria-labelledby="inspector-title">
       <header>
-        <p className="section-kicker">Room details</p>
-        <h2 id="inspector-title">Inspector</h2>
+        <p className="section-kicker">目前工作區</p>
+        <h2 id="inspector-title">詳細資訊</h2>
       </header>
       <dl className="inspector-list">
         <div>
-          <dt>Room</dt>
-          <dd>{props.room?.title ?? "No room selected"}</dd>
+          <dt>房間</dt>
+          <dd>{props.room?.title ?? "尚未選擇房間"}</dd>
         </div>
         <div>
-          <dt>Repository root</dt>
-          <dd className="path-value">{props.project?.repositoryRoot ?? "Add a project to begin"}</dd>
+          <dt>儲存庫位置</dt>
+          <dd className="path-value">{props.project?.repositoryRoot ?? "先加入一個專案"}</dd>
         </div>
         <div>
-          <dt>Connection</dt>
+          <dt>連線狀態</dt>
           <dd className={`connection-state connection-${props.connection}`}>
             {CONNECTION_LABEL[props.connection]}
           </dd>
         </div>
         <div>
-          <dt>Timeline source</dt>
-          <dd>Local messages</dd>
+          <dt>資料來源</dt>
+          <dd>這台 Mac 上的本機訊息</dd>
         </div>
       </dl>
       {props.connection === "error" ? (
-        <p className="error-guidance">The timeline could not reconnect. Check the local worker and try again.</p>
+        <p className="error-guidance">無法重新連上本機工作程序，請稍後再試。</p>
       ) : null}
-      {props.taskPending ? <p>Loading task…</p> : null}
+      {props.taskPending ? <p>正在載入任務…</p> : null}
       {props.taskError ? <p role="alert">{props.taskError}</p> : null}
       {props.taskModel && props.requestTask ? (
         <TaskInspector model={props.taskModel} request={props.requestTask} />

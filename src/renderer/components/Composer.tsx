@@ -18,7 +18,7 @@ export function Composer(props: {
       await props.onSend(submittedBody);
       setBody((currentBody) => currentBody === submittedBody ? "" : currentBody);
     } catch {
-      setError("Message was not sent. Try again.");
+      setError("訊息未送出，請再試一次。");
     } finally {
       setSending(false);
     }
@@ -32,20 +32,20 @@ export function Composer(props: {
         void send();
       }}
     >
-      <label htmlFor="message-input">Message</label>
+      <label htmlFor="message-input">訊息</label>
       <textarea
         id="message-input"
         data-testid="message-input"
         value={body}
         disabled={props.disabled}
         onChange={(event) => setBody(event.currentTarget.value)}
-        placeholder={props.disabled ? "Select a connected room to write" : "Write a local message"}
+        placeholder={props.disabled ? "選擇一個已連線的房間後即可輸入" : "輸入訊息，或用 @Claude、@Codex 建立任務"}
         rows={3}
       />
       <div className="composer-actions">
         {error ? <p className="form-error" role="alert">{error}</p> : <span />}
         <button type="submit" data-testid="send-message" disabled={cannotSend}>
-          {sending ? "Sending…" : "Send message"}
+          {sending ? "傳送中…" : "傳送訊息"}
         </button>
       </div>
     </form>

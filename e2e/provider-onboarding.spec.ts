@@ -5,20 +5,20 @@ test("onboarding selects canonical external CLIs and shows public policy gates",
   const app = await launchProviderTestApp();
   try {
     const page = await app.firstWindow();
-    await expect(page.getByText("Connect external coding agents")).toBeVisible();
-    await expect(page.getByText(/context is sent to the selected provider/i)).toBeVisible();
+    await expect(page.getByText("連接你的程式代理")).toBeVisible();
+    await expect(page.getByText(/只會把執行所需的內容送給你選擇的服務/i)).toBeVisible();
 
-    await page.getByRole("button", { name: "Choose Claude CLI" }).click();
-    const claude = page.getByLabel("Claude health");
+    await page.getByRole("button", { name: "選擇 Claude CLI" }).click();
+    const claude = page.getByLabel("Claude 狀態");
     await expect(claude).toContainText(app.claudePath);
     await expect(claude).toContainText("2.1.206");
-    await expect(claude).toContainText("policy disabled");
+    await expect(claude).toContainText("目前未開放");
 
-    await page.getByRole("button", { name: "Choose Codex CLI" }).click();
-    const codex = page.getByLabel("Codex health");
+    await page.getByRole("button", { name: "選擇 Codex CLI" }).click();
+    const codex = page.getByLabel("Codex 狀態");
     await expect(codex).toContainText(app.codexPath);
     await expect(codex).toContainText("0.144.6");
-    await expect(codex).toContainText("policy disabled");
+    await expect(codex).toContainText("目前未開放");
     await expect(page.getByText(/token|api key|account id/i)).toHaveCount(0);
   } finally {
     await app.cleanup();

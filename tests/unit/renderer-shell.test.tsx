@@ -216,10 +216,10 @@ describe("renderer shell", () => {
   it("renders Project/Room navigation, shared timeline, inspector, and composer", () => {
     const html = renderToStaticMarkup(<App store={preloadedTimelineStore()} />);
 
-    expect(html).toContain("Projects");
-    expect(html).toContain("Rooms");
-    expect(html).toContain("Shared Timeline");
-    expect(html).toContain("Inspector");
+    expect(html).toContain("專案");
+    expect(html).toContain("房間");
+    expect(html).toContain("共享時間軸");
+    expect(html).toContain("詳細資訊");
     expect(html).toContain("Persisted hello");
     expect(html).toContain("data-testid=\"message-input\"");
   });
@@ -266,7 +266,7 @@ describe("renderer shell", () => {
     expect(onCreateRoom).toHaveBeenCalledOnce();
     await act(async () => pending.reject(new Error("offline")));
     expect(input.value).toBe("Keep this room");
-    expect(screen.getByRole("alert").textContent).toContain("not created");
+    expect(screen.getByRole("alert").textContent).toContain("無法建立房間");
   });
 
   it("retains a whitespace-different newer room draft when the pending submission resolves", async () => {
@@ -318,7 +318,7 @@ describe("renderer shell", () => {
     );
 
     expect(screen.getByTestId("room-title-input").id).toBe(`room-title-${addedProject.id}`);
-    expect(screen.getByText("Create a room to start a timeline.")).toBeTruthy();
+    expect(screen.getByText("建立一個房間，開始整理這個專案的工作。")).toBeTruthy();
   });
 
   it("selects a room and opens the native project picker", async () => {
@@ -335,7 +335,7 @@ describe("renderer shell", () => {
     );
 
     await user.click(screen.getByRole("button", { name: "Foundation" }));
-    await user.click(screen.getByRole("button", { name: "Add Project" }));
+    await user.click(screen.getByRole("button", { name: "加入專案" }));
 
     expect(onSelectRoom).toHaveBeenCalledWith(ROOM_ID);
     expect(onAddProject).toHaveBeenCalledOnce();
@@ -387,7 +387,7 @@ describe("renderer shell", () => {
     await act(async () => pending.reject(new Error("offline")));
 
     expect(input.value).toBe("Keep this draft");
-    expect(screen.getByRole("alert").textContent).toContain("not sent");
+    expect(screen.getByRole("alert").textContent).toContain("訊息未送出");
   });
 
   it("retains a newer draft and gives guidance when the submitted message rejects", async () => {
@@ -403,7 +403,7 @@ describe("renderer shell", () => {
     await act(async () => pending.reject(new Error("offline")));
 
     expect(input.value).toBe("Draft written while sending");
-    expect(screen.getByRole("alert").textContent).toContain("not sent");
+    expect(screen.getByRole("alert").textContent).toContain("訊息未送出");
   });
 
   it("retains the App composer draft when the real store receives a failed post response", async () => {
@@ -463,7 +463,7 @@ describe("renderer shell", () => {
     await user.type(input, "Keep this through the real store");
     await user.click(screen.getByTestId("send-message"));
 
-    await waitFor(() => expect(screen.getByText("Message was not sent. Try again.")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("訊息未送出，請再試一次。")).toBeTruthy());
     expect(input.value).toBe("Keep this through the real store");
     expect(store.getState()).toMatchObject({
       connection: "error",
@@ -500,7 +500,7 @@ describe("renderer shell", () => {
       messageEvent("Draft survives stale success")
     )));
 
-    await waitFor(() => expect(screen.getByText("Message was not sent. Try again.")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("訊息未送出，請再試一次。")).toBeTruthy());
     expect(input.value).toBe("Draft survives stale success");
     expect(store.getState()).toMatchObject({ connection: "reconnecting", error: null });
     expect(storeListener).toHaveBeenCalledTimes(notificationsAfterDisconnect);
@@ -534,7 +534,7 @@ describe("renderer shell", () => {
     const notificationsAfterDisconnect = storeListener.mock.calls.length;
     await act(async () => pending.reject(new Error("old worker failed")));
 
-    await waitFor(() => expect(screen.getByText("Message was not sent. Try again.")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("訊息未送出，請再試一次。")).toBeTruthy());
     expect(input.value).toBe("Draft survives stale rejection");
     expect(store.getState()).toMatchObject({ connection: "reconnecting", error: null });
     expect(storeListener).toHaveBeenCalledTimes(notificationsAfterDisconnect);
@@ -562,10 +562,10 @@ describe("renderer shell", () => {
 
     expect(html).toContain("&lt;script&gt;alert(&#x27;branch&#x27;)&lt;/script&gt;");
     expect(html).not.toContain("<script>");
-    expect(html).toContain("aria-label=\"Actor: You\"");
-    expect(html).toContain("aria-label=\"Room sequence 42\"");
+    expect(html).toContain("aria-label=\"發言者：你\"");
+    expect(html).toContain("aria-label=\"房間序號 42\"");
     expect(html).toContain("value=\"42\"");
-    expect(html).toContain(">You<");
+    expect(html).toContain(">你<");
   });
 
   it("hydrates once on mount and disposes the store on unmount", () => {
@@ -666,5 +666,11 @@ describe("renderer shell", () => {
     expect(rendererStyles).toMatch(
       /@media \(max-width: 979px\)[\s\S]*\.room-form \{\s*grid-template-columns: minmax\(0, 1fr\)/
     );
+  });
+
+  it("declares Traditional Chinese and gives the project rail a Git-branch visual signature", () => {
+    expect(readFileSync("src/renderer/index.html", "utf8")).toContain('<html lang="zh-Hant-TW">');
+    expect(rendererStyles).toContain("--branch-line:");
+    expect(rendererStyles).toMatch(/\.project-group::before/);
   });
 });

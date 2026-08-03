@@ -11,14 +11,14 @@ test("dual-agent provider task approves, collaborates twice, verifies, and merge
     await createAndApproveTask(page, app, "@Claude implement the greeting");
     await expect.poll(async () => {
       const state = await page.getByTestId("task-state").innerText();
-      if (state === "Failed") throw new Error(await page.locator("body").innerText());
+      if (state === "失敗") throw new Error(await page.locator("body").innerText());
       return state;
-    }, { timeout: 30_000 }).toBe("HumanApproval");
-    await expect(page.getByText("Round 2 of 2")).toBeVisible();
-    await expect(page.getByText("unit — passed")).toBeVisible();
+    }, { timeout: 30_000 }).toBe("等待你的核准");
+    await expect(page.getByLabel("協作回合 2 / 2")).toBeVisible();
+    await expect(page.getByText("unit — 通過")).toBeVisible();
     expect((await repository.run(["rev-parse", "refs/heads/main"])).stdout.trim()).toBe(repository.initialOid);
-    await page.getByRole("button", { name: "Approve final merge" }).click();
-    await expect(page.getByTestId("task-state")).toHaveText("Completed", { timeout: 15_000 });
+    await page.getByRole("button", { name: "核准最終合併" }).click();
+    await expect(page.getByTestId("task-state")).toHaveText("已完成", { timeout: 15_000 });
     expect((await repository.run(["show", "refs/heads/main:greeting.txt"])).stdout).toBe("hello from both agents\n");
   } finally {
     await app.close().catch(() => undefined);
