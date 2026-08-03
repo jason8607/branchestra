@@ -28,4 +28,18 @@ describe("external provider executable discovery", () => {
     expect(detected).toBeNull();
     expect(runner).not.toHaveBeenCalled();
   });
+
+  it.each([
+    ["claude", "2.1.220"],
+    ["codex", "0.145.0"],
+  ] as const)("discovers the current %s CLI version", async (provider, version) => {
+    const root = await mkdtemp(join(tmpdir(), "branchestra-cli-"));
+    const selected = join(root, provider);
+    await writeFile(selected, "#!/bin/sh\nexit 0\n", "utf8");
+    await chmod(selected, 0o755);
+    const runner = vi.fn().mockResolvedValue({ stdout: `${version}\n`, stderr: "" });
+
+    await expect(discoverExternalExecutable({ provider, selectedPath: selected, homeDirectory: root, architecture: "arm64", runner }))
+      .resolves.toMatchObject({ provider, cliVersion: version });
+  });
 });

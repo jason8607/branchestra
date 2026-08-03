@@ -9,7 +9,7 @@ export type ProviderAuthDecision =
 const ClaudeSubscriptionSchema = z.object({
   loggedIn: z.literal(true),
   authMethod: z.literal("claude.ai"),
-  subscriptionType: z.enum(["free", "pro", "max"]),
+  subscriptionType: z.string().optional(),
 }).passthrough();
 
 export async function probeProviderAuth(input: {
@@ -38,7 +38,8 @@ export async function probeProviderAuth(input: {
   }
 
   if (input.provider === "codex") {
-    const status = result.stdout.trim();
+    const recognizedStatuses = new Set(["Logged in using ChatGPT", "Logged in using an API key", "Not logged in"]);
+    const status = `${result.stdout}\n${result.stderr}`.split(/\r?\n/).map((line) => line.trim()).find((line) => recognizedStatuses.has(line));
     if (status === "Logged in using ChatGPT") return { state: "subscription", display: "ChatGPT" };
     if (status === "Logged in using an API key") return { state: "blocked", reason: "Unsupported Codex auth mode: api_key" };
     if (status === "Not logged in") return { state: "signed_out", reason: "codex is not logged in" };
@@ -54,8 +55,10 @@ export async function probeProviderAuth(input: {
   const subscription = ClaudeSubscriptionSchema.safeParse(parsed);
   if (subscription.success) {
     const type = subscription.data.subscriptionType;
-    return { state: "subscription", display: `Claude ${type[0]!.toUpperCase()}${type.slice(1)}` };
+    return { state: "subscription", display: type && ["free", "pro", "max"].includes(type) ? `Claude ${type[0]!.toUpperCase()}${type.slice(1)}` : "Claude" };
   }
+  const signedOut = z.object({ loggedIn: z.literal(false) }).passthrough().safeParse(parsed);
+  if (signedOut.success) return { state: "signed_out", reason: "claude is not logged in" };
   const mode = z.object({ authMethod: z.string() }).passthrough().safeParse(parsed);
   if (mode.success) return { state: "blocked", reason: `Unsupported Claude auth mode: ${mode.data.authMethod}` };
   return { state: "unknown", reason: "Unrecognized Claude auth status" };

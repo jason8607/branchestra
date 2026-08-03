@@ -39,7 +39,7 @@ import { buildProviderEnvironment } from "./providers/provider-environment";
 import { execFileNoShell } from "./process/exec-file";
 import { ProcessIdentityProbe } from "./process/process-identity";
 import { ProviderProcessSupervisor } from "./process/provider-process-supervisor";
-import { validateCodexSubscriptionConfigLock } from "../shared/security/codex-config-lock";
+import { CURRENT_PRIVATE_CODEX_CLI_VERSION, validateCodexSubscriptionConfigLock } from "../shared/security/codex-config-lock";
 import { EFFECTIVE_PROVIDER_POLICY } from "../shared/config/effective-provider-policy";
 import { CLAUDE_CAPABILITIES } from "../provider-runner/claude-runtime";
 import { CODEX_CAPABILITIES } from "../provider-runner/codex-runtime";
@@ -369,7 +369,7 @@ export async function startWorker(options: WorkerStartOptions): Promise<WorkerRu
       const lockRealpath = async (): Promise<string> => {
         const decision = await validateCodexSubscriptionConfigLock({
           resourcesRootRealpath,
-          expectedCliVersion: "0.144.6",
+          expectedCliVersion: CURRENT_PRIVATE_CODEX_CLI_VERSION,
           manifestPath: resolve(resourcesRootRealpath, packagedResources ? "codex-config-lock-manifest.json" : "config/codex-config-lock-manifest.json"),
         });
         if (!decision.valid) throw new Error(decision.reason);

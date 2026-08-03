@@ -3,16 +3,20 @@ import { evaluateSupport } from "../../../src/worker/providers/support-matrix";
 import matrix from "../../../config/provider-support-matrix.json";
 
 describe("provider support matrix", () => {
-  it("loads one explicit machine-readable row per Provider and architecture", () => {
-    expect(matrix.rows).toHaveLength(4);
+  it("loads one explicit machine-readable row per reviewed Provider version and architecture", () => {
+    expect(matrix.rows).toHaveLength(8);
     expect(new Set(matrix.rows.map((row) => `${row.provider}:${row.architecture}`)).size).toBe(4);
     expect(matrix.rows.every((row) => row.profileHash === null && row.lastControlledSmoke === null)).toBe(true);
   });
   it.each([
     ["claude", "0.3.216", "2.1.206", "arm64"],
     ["claude", "0.3.216", "2.1.206", "x64"],
+    ["claude", "0.3.216", "2.1.220", "arm64"],
+    ["claude", "0.3.216", "2.1.220", "x64"],
     ["codex", "0.144.6", "0.144.6", "arm64"],
     ["codex", "0.144.6", "0.144.6", "x64"],
+    ["codex", "0.144.6", "0.145.0", "arm64"],
+    ["codex", "0.144.6", "0.145.0", "x64"],
   ] as const)("accepts the reviewed %s tuple", (provider, sdkVersion, cliVersion, architecture) => {
     expect(evaluateSupport({ provider, sdkVersion, cliVersion, architecture })).toEqual({ supported: true });
   });

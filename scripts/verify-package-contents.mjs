@@ -10,8 +10,12 @@ export async function verifyPackageContents(appPathInput, repoRoot = process.cwd
   }
   const resourcesPath = path.join(appPath, "Contents", "Resources");
   const policy = JSON.parse(fs.readFileSync(path.join(repoRoot, "config/provider-policy.json"), "utf8"));
-  if (policy.publicFeatures.codexSubscription) {
-    const manifest = JSON.parse(fs.readFileSync(path.join(repoRoot, "config/codex-config-lock-manifest.json"), "utf8"));
+  const packagedManifestPath = path.join(resourcesPath, "codex-config-lock-manifest.json");
+  if (policy.publicFeatures.codexSubscription || fs.existsSync(packagedManifestPath)) {
+    const repositoryManifestBody = fs.readFileSync(path.join(repoRoot, "config/codex-config-lock-manifest.json"), "utf8");
+    const packagedManifestBody = fs.readFileSync(packagedManifestPath, "utf8");
+    if (packagedManifestBody !== repositoryManifestBody) throw new Error("Packaged Codex config lock manifest is not the reviewed manifest");
+    const manifest = JSON.parse(repositoryManifestBody);
     const packagedLock = path.join(resourcesPath, manifest.packagedRelativePath);
     const bytes = fs.readFileSync(packagedLock);
     const hash = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;

@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -25,5 +25,18 @@ describe("packaged content gate", () => {
     await writeFile(target, "forbidden", "utf8");
     if (name === "codex") await chmod(target, 0o755);
     await expect(verifyPackageContents(fixture.app)).rejects.toThrow("Forbidden packaged");
+  });
+
+  it("verifies a packaged private-local Codex lock against the reviewed manifest", async () => {
+    const fixture = await appFixture();
+    const manifest = JSON.parse(await readFile("config/codex-config-lock-manifest.json", "utf8")) as { packagedRelativePath: string; repositoryPath: string };
+    const lock = await readFile(manifest.repositoryPath);
+    const packagedLock = join(fixture.resources, manifest.packagedRelativePath);
+    await mkdir(join(packagedLock, ".."), { recursive: true });
+    await writeFile(join(fixture.resources, "codex-config-lock-manifest.json"), await readFile("config/codex-config-lock-manifest.json"));
+    await writeFile(packagedLock, lock);
+    await expect(verifyPackageContents(fixture.app)).resolves.toBe(true);
+    await writeFile(packagedLock, Buffer.concat([lock, Buffer.from("changed")]));
+    await expect(verifyPackageContents(fixture.app)).rejects.toThrow("Packaged Codex config lock");
   });
 });
