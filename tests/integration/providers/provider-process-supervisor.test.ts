@@ -1,8 +1,44 @@
-import { resolve } from "node:path";
+import { spawn } from "node:child_process";
+import { dirname, resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { execFileNoShell } from "../../../src/worker/process/exec-file";
 import { ProcessIdentityProbe } from "../../../src/worker/process/process-identity";
-import { ProviderProcessSupervisor } from "../../../src/worker/process/provider-process-supervisor";
+import { ProviderProcessSupervisor, type ProviderChildSpawn } from "../../../src/worker/process/provider-process-supervisor";
+
+describe("ProviderProcessSupervisor launch directory", () => {
+  it("launches a runner from the executable directory instead of its potentially virtual ASAR parent", async () => {
+    let observedCwd: string | undefined;
+    const spawnChild: ProviderChildSpawn = (command, args, options) => {
+      observedCwd = options.cwd;
+      return spawn(command, args, options);
+    };
+    const supervisor = new ProviderProcessSupervisor({
+      probe: {
+        read: async (pid: number, runId: string, providerExecutableRealpath: string, workerGeneration: string) => ({
+          runId, pid, pgid: pid, runnerExecutableRealpath: process.execPath,
+          providerExecutableRealpath, startToken: "start", workerGeneration,
+        }),
+        verify: vi.fn(),
+      },
+      journal: { recordProviderIdentity: vi.fn(), recordProviderSignal: vi.fn(), completeProviderProcess: vi.fn() },
+      now: () => new Date().toISOString(),
+      spawnChild,
+    });
+    const handle = await supervisor.spawn({
+      runId: "019f842d-e19a-7cc1-9d73-4d287bf40559",
+      workerGeneration: "119f842d-e19a-7cc1-9d73-4d287bf40559",
+      runnerEntryRealpath: resolve("tests/fixtures/process/idle-runner-fixture.mjs"),
+      providerExecutableRealpath: "/usr/bin/true",
+      env: { HOME: "/tmp", PATH: "/usr/bin:/bin" },
+    });
+    try {
+      expect(observedCwd).toBe(dirname(process.execPath));
+    } finally {
+      handle.child.kill("SIGKILL");
+      await handle.exited;
+    }
+  });
+});
 
 describe.runIf(process.platform === "darwin" && process.env.BRANCHESTRA_ALLOW_PROCESS_GROUP_TEST === "1")("ProviderProcessSupervisor", () => {
   it("aborts, TERM-signals, then KILL-signals a verified runner group", async () => {

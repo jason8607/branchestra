@@ -4,6 +4,16 @@ import type { ProviderRunnerCommand } from "../../shared/contracts/provider-runn
 import type { ProviderProcessIdentity, ProcessIdentityProbe } from "./process-identity";
 
 type CancelReason = "user" | "quit" | "timeout";
+export interface ProviderChildSpawnOptions {
+  cwd: string;
+  detached: true;
+  env: Record<string, string>;
+  shell: false;
+  stdio: ["pipe", "pipe", "pipe"];
+}
+export interface ProviderChildSpawn {
+  (command: string, args: readonly string[], options: ProviderChildSpawnOptions): ChildProcessWithoutNullStreams;
+}
 export interface ActiveProviderProcess {
   runId: string; pgid: number; identity: ProviderProcessIdentity; child: ChildProcessWithoutNullStreams;
   transport: { send(command: ProviderRunnerCommand): Promise<void> };
@@ -19,6 +29,7 @@ export interface ProviderProcessSupervisorDependencies {
   now(): string;
   config?: { abortGraceMs: number; termGraceMs: number; killWaitMs: number };
   killGroup?: (pgid: number, signal: NodeJS.Signals) => void;
+  spawnChild?: ProviderChildSpawn;
 }
 
 export class ProviderProcessSupervisor {
@@ -30,8 +41,9 @@ export class ProviderProcessSupervisor {
 
   async spawn(input: { runId: string; workerGeneration: string; runnerEntryRealpath: string; providerExecutableRealpath: string; env: Record<string, string> }): Promise<ActiveProviderProcess> {
     if (this.active.has(input.runId)) throw new Error("Provider run is already active");
-    const child = spawn(process.execPath, [input.runnerEntryRealpath, "--branchestra-run-id", input.runId, "--branchestra-provider-executable-realpath", input.providerExecutableRealpath], {
-      cwd: dirname(input.runnerEntryRealpath), detached: true, env: { ...input.env, ELECTRON_RUN_AS_NODE: "1" }, shell: false, stdio: ["pipe", "pipe", "pipe"],
+    const spawnChild: ProviderChildSpawn = this.deps.spawnChild ?? spawn;
+    const child = spawnChild(process.execPath, [input.runnerEntryRealpath, "--branchestra-run-id", input.runId, "--branchestra-provider-executable-realpath", input.providerExecutableRealpath], {
+      cwd: dirname(process.execPath), detached: true, env: { ...input.env, ELECTRON_RUN_AS_NODE: "1" }, shell: false, stdio: ["pipe", "pipe", "pipe"],
     });
     if (!child.pid) throw new Error("Provider runner did not expose a PID");
     let identity: ProviderProcessIdentity;
