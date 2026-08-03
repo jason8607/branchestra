@@ -59,6 +59,7 @@ export interface RunnerBackedAdapterDependencies {
 }
 
 interface ActiveRun { runner: RunnerHandle; queue: AsyncEventQueue<TaskProviderEvent>; settle(result: TaskProviderRunResult): void }
+const PROVIDER_SESSION_START_TIMEOUT_MS = 30_000;
 
 function runnerContextHash(value: string): string {
   const hash = value.startsWith("sha256:") ? value.slice("sha256:".length) : value;
@@ -202,7 +203,7 @@ export class RunnerBackedAdapter implements ProviderAdapter {
         const timeout = Promise.withResolvers<never>();
         const timer = setTimeout(
           () => timeout.reject(new Error(`PROVIDER_SESSION_START_TIMEOUT:${this.provider}`)),
-          Math.max(1, Math.min(request.approvedCapabilities.maxRunMs, 5_000))
+          Math.max(1, Math.min(request.approvedCapabilities.maxRunMs, PROVIDER_SESSION_START_TIMEOUT_MS))
         );
         void completion.promise.then(() => {
           timeout.reject(new Error(`PROVIDER_SESSION_MISSING:${this.provider}`));

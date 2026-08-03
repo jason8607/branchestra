@@ -42,6 +42,48 @@ describe("RunnerBackedAdapter", () => {
     await expect(handle.completion).resolves.toEqual({ outcome: "completed", summary: "done", error: null });
   });
 
+  it("allows a cold Provider session to start after more than five seconds", async () => {
+    vi.useFakeTimers();
+    try {
+      let deliver: ((message: unknown) => Promise<void>) | undefined;
+      const send = vi.fn(async () => {
+        setTimeout(() => {
+          void deliver!({
+            type: "provider.raw",
+            runId: request.runId,
+            providerSeq: 0,
+            receivedAt: "2026-07-21T10:00:12.000Z",
+            payload: { type: "thread.started", thread_id: "thread-cold-start" }
+          });
+        }, 12_000);
+      });
+      const adapter = new RunnerBackedAdapter({
+        provider: "codex", capabilities: { interactiveApproval: false, protocolInterrupt: false, processAbort: true, textDeltaStreaming: false, itemEventStreaming: true, sessionResume: true, workspaceWriteSandbox: true, toolNetworkControl: true, contextTools: "injected" },
+        health: { list: async () => [{ provider: "codex", state: "ready", executableRealpath: "/opt/homebrew/bin/codex", cliVersion: "0.145.0", sdkVersion: "0.144.6", architecture: "arm64", authLabel: "Subscription-only", capabilities: null, repairAction: null }] },
+        codexConfigLockRealpath: async () => "/app/subscription.config.lock.toml",
+        runner: { launch: async (_input, accept) => { deliver = accept; return { send, cancel: vi.fn() }; } },
+        normalize: (raw, run) => (raw as { type?: string }).type === "thread.started"
+          ? [{ ...run, provider: "codex", type: "session.started", sessionId: "thread-cold-start" }]
+          : [],
+        now: () => "2026-07-21T10:00:12.000Z",
+      });
+      const starting = adapter.startRun({
+        ...request,
+        approvedCapabilities: { ...request.approvedCapabilities, maxRunMs: 60_000 }
+      });
+      let settled = false;
+      void starting.then(() => { settled = true; }, () => { settled = true; });
+
+      await vi.advanceTimersByTimeAsync(5_001);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(6_999);
+
+      await expect(starting).resolves.toMatchObject({ sessionId: "thread-cold-start" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("fails closed when health is not ready", async () => {
     const adapter = new RunnerBackedAdapter({
       provider: "codex", capabilities: {} as never,
