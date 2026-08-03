@@ -213,15 +213,17 @@ function realRendererApi(
 afterEach(cleanup);
 
 describe("renderer shell", () => {
-  it("renders Project/Room navigation, conversation, inspector, and composer", () => {
+  it("renders only Project/Room navigation, conversation, and composer", () => {
     const html = renderToStaticMarkup(<App store={preloadedTimelineStore()} />);
 
     expect(html).toContain("專案");
     expect(html).toContain("房間");
     expect(html).toContain("對話");
-    expect(html).toContain("詳細資訊");
     expect(html).toContain("Persisted hello");
     expect(html).toContain("data-testid=\"message-input\"");
+    expect(html).not.toContain("詳細資訊");
+    expect(html).not.toContain("代理任務");
+    expect(html).not.toContain("核准任務範圍");
   });
 
   it("controls the room title and creates a room with the entered title", async () => {
@@ -642,6 +644,47 @@ describe("renderer shell", () => {
     expect(html).not.toContain("代理執行狀態已更新");
   });
 
+  it("collapses streamed Agent message fragments into the latest reply for that run", () => {
+    const fragment: RoomEvent = {
+      id: "30000000-0000-4000-8000-000000000096",
+      roomId: ROOM_ID,
+      roomSeq: 44,
+      type: "agent.run",
+      actor: "claude",
+      payload: {
+        run: {
+          id: "run-claude-stream",
+          taskId: "task-claude-stream",
+          provider: "claude",
+          role: "lead",
+          providerSessionId: "session-claude-stream",
+          contextVersion: 1,
+          contextHash: `sha256:${"b".repeat(64)}`,
+          state: "running",
+          startedAt: CREATED_AT,
+          finishedAt: null
+        },
+        event: { type: "assistant.message", text: "尚未完成的片段" }
+      },
+      createdAt: CREATED_AT
+    };
+    const complete: RoomEvent = {
+      ...fragment,
+      id: "30000000-0000-4000-8000-000000000097",
+      roomSeq: 45,
+      payload: {
+        ...fragment.payload,
+        event: { type: "assistant.message", text: "這是 Claude 的完整回覆。" }
+      }
+    };
+
+    const html = renderToStaticMarkup(<Timeline events={[fragment, complete]} />);
+
+    expect(html).toContain("這是 Claude 的完整回覆。");
+    expect(html).not.toContain("尚未完成的片段");
+    expect(html.match(/發言者：Claude/g)).toHaveLength(1);
+  });
+
   it("hydrates once on mount and disposes the store on unmount", () => {
     const store = preloadedTimelineStore();
     const view = render(<App store={store} />);
@@ -674,7 +717,7 @@ describe("renderer shell", () => {
     expect(screen.getByText("Arrived from subscription")).toBeTruthy();
   });
 
-  it("handles a selectRoom rejection while rendering the store error update", async () => {
+  it("handles a selectRoom rejection without exposing an internal replay error", async () => {
     const user = userEvent.setup();
     let state = timelineState();
     const listeners = new Set<() => void>();
@@ -698,7 +741,8 @@ describe("renderer shell", () => {
 
     await user.click(screen.getByRole("button", { name: "Foundation" }));
 
-    await waitFor(() => expect(screen.getByText("Room replay failed")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("正在重新連線…")).toBeTruthy());
+    expect(screen.queryByText("Room replay failed")).toBeNull();
     expect(catchRejection).toHaveBeenCalledOnce();
     expect(store.getState()).toMatchObject({ connection: "error", error: "Room replay failed" });
   });
@@ -733,9 +777,9 @@ describe("renderer shell", () => {
     }
   });
 
-  it("keeps the project rail usable when the inspector moves below the timeline", () => {
+  it("keeps the project rail usable beside the conversation on compact screens", () => {
     expect(rendererStyles).toMatch(
-      /@media \(max-width: 979px\)[\s\S]*grid-template-columns: minmax\(220px, 0\.75fr\)/
+      /@media \(max-width: 979px\)[\s\S]*grid-template-columns: minmax\(220px, 248px\) minmax\(0, 1fr\)/
     );
     expect(rendererStyles).toMatch(
       /@media \(max-width: 979px\)[\s\S]*\.room-form \{\s*grid-template-columns: minmax\(0, 1fr\)/

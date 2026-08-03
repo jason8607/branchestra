@@ -28,7 +28,17 @@ function messageText(event: ConversationEvent): string {
 export function Timeline(props: {
   events: readonly RoomEvent[];
 }): React.JSX.Element {
-  const messages = props.events.filter(isConversationEvent);
+  const latestAgentMessageByRun = new Map<string, string>();
+  for (const event of props.events) {
+    if (event.type === "agent.run" && event.payload.event.type === "assistant.message") {
+      latestAgentMessageByRun.set(event.payload.run.id, event.id);
+    }
+  }
+  const messages = props.events.filter((event): event is ConversationEvent => (
+    isConversationEvent(event)
+    && (event.type === "message.posted"
+      || latestAgentMessageByRun.get(event.payload.run.id) === event.id)
+  ));
   if (messages.length === 0) {
     return (
       <section className="timeline" data-testid="shared-timeline" aria-label="對話">

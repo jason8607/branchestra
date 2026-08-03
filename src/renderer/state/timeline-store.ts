@@ -599,6 +599,10 @@ export function createTimelineStore(
         }
         const parsedEvent = RoomEventSchema.safeParse(response.payload.data);
         if (!parsedEvent.success) throw new Error("Unable to post message");
+        if (parsedEvent.data.roomSeq > currentSequence(roomId) + 1) {
+          await catchUp(roomId, operationEpoch);
+          if (!isCurrent(operationEpoch)) throw new Error(POST_INTERRUPTED_MESSAGE);
+        }
         acceptEvent(parsedEvent.data, operationEpoch);
       } catch (error) {
         if (!isCurrent(operationEpoch)) {

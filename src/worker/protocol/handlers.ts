@@ -18,6 +18,9 @@ export interface CommandHandlerServices {
     "createFromUserMessage" | "decideScope" | "grantAdditionalRounds"
     | "decideScopeResult" | "grantAdditionalRoundsResult">;
   taskExecutionServices?: TaskExecutionServices;
+  conversationTaskRunner?: {
+    start(taskId: string, idempotencyKey: string): Promise<void>;
+  };
   taskCommandHandlers?: readonly AnyCommandHandler[];
   providerHealthService?: ProviderHealthService;
   exportDiagnostics?(destinationPath: string): Promise<{ sha256: string; bytes: number }>;
@@ -141,29 +144,67 @@ export function createCommandHandlers(
           roomId: command.payload.roomId,
           body: command.payload.body
         }, context.durable(command));
-        if (parseAgentMentions(command.payload.body).length > 0) {
-          await services.taskService.createFromUserMessage({
-            roomId: command.payload.roomId,
-            messageEventId: result.value.id,
-            text: command.payload.body,
-            explicitLead: command.payload.leadProvider ?? null,
-            idempotencyKey: context.idempotencyKey,
-            ...(command.payload.commandClasses === undefined
-              ? {}
-              : { commandClasses: command.payload.commandClasses }),
-            ...(command.payload.allowCollaborator === undefined
-              ? {}
-              : { allowCollaborator: command.payload.allowCollaborator }),
-            ...(command.payload.toolNetwork === undefined
-              ? {}
-              : { toolNetwork: command.payload.toolNetwork }),
-            ...(command.payload.maxRunMs === undefined
-              ? {}
-              : { maxRunMs: command.payload.maxRunMs }),
-            ...(command.payload.collaborationRoundBudget === undefined
-              ? {}
-              : { collaborationRoundBudget: command.payload.collaborationRoundBudget })
-          });
+        const mentions = parseAgentMentions(command.payload.body);
+        if (mentions.length > 0) {
+          const conversational = services.conversationTaskRunner !== undefined;
+          const leads = conversational
+            ? mentions
+            : [command.payload.leadProvider ?? null];
+          const createdTasks = [];
+          for (const lead of leads) {
+            const taskKey = lead === null
+              ? context.idempotencyKey
+              : `${context.idempotencyKey}:${lead}`;
+            const created = await services.taskService.createFromUserMessage({
+              roomId: command.payload.roomId,
+              messageEventId: result.value.id,
+              text: command.payload.body,
+              explicitLead: lead,
+              idempotencyKey: taskKey,
+              ...(conversational
+                ? {
+                    commandClasses: [] as const,
+                    allowCollaborator: false,
+                    toolNetwork: false,
+                    collaborationRoundBudget: 0
+                  }
+                : {
+                    ...(command.payload.commandClasses === undefined
+                      ? {}
+                      : { commandClasses: command.payload.commandClasses }),
+                    ...(command.payload.allowCollaborator === undefined
+                      ? {}
+                      : { allowCollaborator: command.payload.allowCollaborator }),
+                    ...(command.payload.toolNetwork === undefined
+                      ? {}
+                      : { toolNetwork: command.payload.toolNetwork }),
+                    ...(command.payload.maxRunMs === undefined
+                      ? {}
+                      : { maxRunMs: command.payload.maxRunMs }),
+                    ...(command.payload.collaborationRoundBudget === undefined
+                      ? {}
+                      : { collaborationRoundBudget: command.payload.collaborationRoundBudget })
+                  })
+            });
+            createdTasks.push({ created, taskKey });
+          }
+          if (services.conversationTaskRunner) {
+            for (const { created, taskKey } of createdTasks) {
+              await services.taskService.decideScopeResult({
+                taskId: created.task.id,
+                approvalRequestId: created.approvalRequest.id,
+                decision: "approved",
+                displayedScopeHash: created.approvalRequest.scopeHash,
+                workerGeneration: context.workerGeneration,
+                idempotencyKey: `${taskKey}:auto-approve`
+              });
+            }
+            for (const { created, taskKey } of createdTasks) {
+              void services.conversationTaskRunner
+                .start(created.task.id, `${taskKey}:conversation`)
+                .catch(() => undefined);
+            }
+          }
         }
         return { data: result.value, replayed: result.replayed };
       }

@@ -441,7 +441,7 @@ describe("worker runtime lease", () => {
     }
   });
 
-  it("routes a mentioned message into one durable pending task on the canonical runtime", async () => {
+  it("retains the approval workflow when explicit manual conversation mode is requested", async () => {
     const root = mkdtempSync(join(tmpdir(), "branchestra-worker-task-"));
     const repository = createGitRepository();
     const dbPath = join(root, "branchestra.sqlite3");
@@ -490,7 +490,10 @@ describe("worker runtime lease", () => {
       database = undefined;
 
       const port = fakePort();
-      runtime = await startWorker(startOptions(dbPath, port, generation, 180));
+      runtime = await startWorker({
+        ...startOptions(dbPath, port, generation, 180),
+        conversationMode: "manual"
+      });
       port.emit(message);
       await waitForResponses(port, 1);
       const response = port.sent.flatMap((value) => {

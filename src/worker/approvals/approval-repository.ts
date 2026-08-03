@@ -118,6 +118,21 @@ export class ApprovalRepository {
     return row ? mapRequest(row) : null;
   }
 
+  renewTaskScopeRequestGeneration(
+    requestId: string,
+    workerGeneration: string
+  ): ApprovalRequest {
+    const updated = this.db.prepare(
+      "UPDATE approval_requests SET requested_generation = ? WHERE id = ? AND status = 'pending' AND kind = 'task_scope'"
+    ).run(workerGeneration, requestId);
+    if (updated.changes !== 1) {
+      throw new Error(`TASK_SCOPE_REQUEST_NOT_RENEWABLE:${requestId}`);
+    }
+    const request = this.getRequest(requestId);
+    if (!request) throw new Error(`APPROVAL_REQUEST_NOT_FOUND:${requestId}`);
+    return request;
+  }
+
   decideRequest(requestId: string, receipt: ApprovalReceipt): void {
     this.db.transaction(() => {
       const request = this.getRequest(requestId);

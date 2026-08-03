@@ -118,6 +118,85 @@ describe("worker router", () => {
     expect(response).toMatchObject({ v: 1, requestId: request.requestId, idempotencyKey: request.idempotencyKey, workerGeneration: activeGeneration, type: "response", payload: { ok: true, requestType: "state.getSnapshot", replayed: false } });
   });
 
+  it("automatically starts one conversational run for every mentioned Agent", async () => {
+    const roomId = "20000000-0000-4000-8000-000000000001";
+    const event = {
+      id: "30000000-0000-4000-8000-000000000001",
+      roomId,
+      roomSeq: 1,
+      type: "message.posted" as const,
+      actor: "user" as const,
+      payload: {
+        id: "40000000-0000-4000-8000-000000000001",
+        roomId,
+        body: "@Claude @Codex 你們可以彼此對話？",
+        createdAt: "2026-07-21T12:00:00.000Z"
+      },
+      createdAt: "2026-07-21T12:00:00.000Z"
+    };
+    const createFromUserMessage = vi.fn(async (input: { explicitLead: "claude" | "codex" }) => ({
+      task: { id: `task-${input.explicitLead}` },
+      approvalRequest: {
+        id: `approval-${input.explicitLead}`,
+        scopeHash: `scope-${input.explicitLead}`
+      },
+      baseSnapshotWarning: null
+    }));
+    const decideScopeResult = vi.fn(async (input: { taskId: string }) => ({
+      value: { id: input.taskId },
+      replayed: false
+    }));
+    const start = vi.fn<(taskId: string, idempotencyKey: string) => Promise<void>>()
+      .mockResolvedValue(undefined);
+    const handlers = createCommandHandlers({
+      projectService: { addExistingProject: vi.fn() },
+      roomService: {
+        createRoom: vi.fn(),
+        postUserMessage: () => ({ value: event, replayed: false }),
+        getSnapshot: vi.fn(),
+        replayRoom: vi.fn()
+      },
+      taskService: {
+        createFromUserMessage: createFromUserMessage as never,
+        decideScope: vi.fn(),
+        grantAdditionalRounds: vi.fn(),
+        decideScopeResult: decideScopeResult as never,
+        grantAdditionalRoundsResult: vi.fn()
+      },
+      conversationTaskRunner: { start },
+      prepareQuit: async () => undefined
+    });
+    const route = createWorkerRouter({ workerGeneration: activeGeneration, handlers });
+
+    const response = await route({
+      v: 1,
+      requestId: "10000000-0000-4000-8000-000000000009",
+      idempotencyKey: "message-both",
+      workerGeneration: activeGeneration,
+      type: "message.post",
+      payload: { roomId, body: event.payload.body, leadProvider: "claude" }
+    });
+    await Promise.resolve();
+
+    expect(response.payload).toMatchObject({ ok: true, requestType: "message.post" });
+    expect(createFromUserMessage.mock.calls.map(([input]) => input)).toEqual([
+      expect.objectContaining({
+        explicitLead: "claude",
+        commandClasses: [],
+        allowCollaborator: false,
+        collaborationRoundBudget: 0
+      }),
+      expect.objectContaining({
+        explicitLead: "codex",
+        commandClasses: [],
+        allowCollaborator: false,
+        collaborationRoundBudget: 0
+      })
+    ]);
+    expect(decideScopeResult).toHaveBeenCalledTimes(2);
+    expect(start.mock.calls.map(([taskId]) => taskId)).toEqual(["task-claude", "task-codex"]);
+  });
+
   it("serves a large snapshot in bounded pages and rejects a skipped session cursor", async () => {
     const project = { id: "10000000-0000-4000-8000-000000000001", repositoryRoot: "/repo", gitCommonDir: "/repo/.git", displayName: "repo", headOid: "a".repeat(40), defaultBranch: "main", createdAt: "2026-07-21T12:00:00.000Z" };
     const rooms = Array.from({ length: 600 }, (_, index) => ({

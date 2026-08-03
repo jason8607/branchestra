@@ -549,6 +549,33 @@ describe("timeline store", () => {
     expect(store.getState().eventsByRoom[ROOM_ID]).toEqual([posted]);
   });
 
+  it("catches up events committed before the posted message response", async () => {
+    const existing = Array.from({ length: 36 }, (_, index) => messageEvent(index + 1));
+    const intervening = messageEvent(37);
+    const posted = messageEvent(38);
+    const fixture = apiHarness((command) => {
+      if (command.type === "state.getSnapshot") {
+        return successResponse(command, foundationSnapshot(36));
+      }
+      if (command.type === "room.replay") {
+        return successResponse(command, command.payload.roomSeq === 0
+          ? eventPage(existing, false)
+          : eventPage([intervening, posted], false));
+      }
+      if (command.type === "message.post") return successResponse(command, posted);
+      throw new Error(`Unexpected command: ${command.type}`);
+    });
+    const store = createTimelineStore(fixture.api, sequentialIds());
+    await store.hydrate();
+
+    await store.postMessage(ROOM_ID, "message 38");
+
+    expect(store.getState()).toMatchObject({ connection: "ready", error: null });
+    expect(store.getState().eventsByRoom[ROOM_ID]?.map((event) => event.roomSeq)).toEqual(
+      Array.from({ length: 38 }, (_, index) => index + 1)
+    );
+  });
+
   it("uses the first Agent mention as the explicit lead for a collaborative task", async () => {
     const posted = messageEvent(1);
     const fixture = apiHarness((command) => {

@@ -66,6 +66,7 @@ import { createRepositories } from "./storage/repositories";
 import { createWorkerLeaseStore, type WorkerIdentity } from "./storage/worker-lease-store";
 import { TaskService } from "./tasks/task-service";
 import { createTaskExecutionServices } from "./tasks/task-execution-services";
+import { parseAgentMentions } from "./tasks/mention-parser";
 import { CandidateService } from "./tasks/candidate-service";
 import { E2EMockWorkflow } from "./tasks/e2e-mock-workflow";
 import { RecoveryCoordinator } from "./tasks/recovery-coordinator";
@@ -86,6 +87,7 @@ export interface WorkerStartOptions {
     enabled: true;
     scenario: E2EMockScenario;
   };
+  conversationMode?: "automatic" | "manual";
 }
 
 export interface WorkerRuntime {
@@ -456,6 +458,80 @@ export async function startWorker(options: WorkerStartOptions): Promise<WorkerRu
       now: clock.now,
       publish: publishRoomEvent
     });
+    const automaticConversation = options.conversationMode !== "manual"
+      && (!options.e2eMock || options.conversationMode === "automatic");
+    const conversationTaskRunner = automaticConversation ? {
+      async start(taskId: string, idempotencyKey: string): Promise<void> {
+        try {
+          await taskExecutionServices.engine.startApprovedTask(
+            taskId,
+            `${idempotencyKey}:run`
+          );
+          const task = repositories.tasks.getRequired(taskId);
+          const receipt = task.scopeApprovalId
+            ? repositories.approvals.get(task.scopeApprovalId)
+            : null;
+          if (
+            parseAgentMentions(task.requestText).length > 1
+            && receipt?.kind === "task_scope"
+            && receipt.scope.allowCollaborator
+            && task.collaborationRoundsUsed < task.collaborationRoundBudget
+          ) {
+            await taskExecutionServices.collaboration.requestRound({
+              taskId,
+              purpose: "review",
+              idempotencyKey: `${idempotencyKey}:collaborator`
+            });
+          }
+        } finally {
+          await taskExecutionServices.engine.cancel(
+            taskId,
+            "user",
+            `${idempotencyKey}:finish`
+          );
+        }
+      }
+    } : undefined;
+    if (conversationTaskRunner) {
+      queueMicrotask(() => {
+        void (async () => {
+          const pendingTasks = repositories.tasks.listNonTerminal().filter((task) => (
+            task.state === "AwaitingApproval"
+            || (task.state === "Interrupted" && task.interruptedFromState === "AwaitingApproval")
+          ));
+          for (let task of pendingTasks) {
+            if (task.state === "Interrupted") {
+              const preview = await recovery.preview(task.id);
+              task = await recovery.resolve({
+                taskId: task.id,
+                previewHash: preview.previewHash,
+                decision: "resume_recorded_phase",
+                selectedOperationIds: [],
+                idempotencyKey: `conversation-recover:${task.id}`
+              });
+            }
+            let request = repositories.approvals.getPendingRequest(task.id);
+            if (!request || request.kind !== "task_scope") continue;
+            if (request.requestedGeneration !== options.identity.workerGeneration) {
+              request = repositories.approvals.renewTaskScopeRequestGeneration(
+                request.id,
+                options.identity.workerGeneration
+              );
+            }
+            const key = `conversation-resume:${task.id}:${options.identity.workerGeneration}`;
+            await taskService.decideScopeResult({
+              taskId: task.id,
+              approvalRequestId: request.id,
+              decision: "approved",
+              displayedScopeHash: request.scopeHash,
+              workerGeneration: options.identity.workerGeneration,
+              idempotencyKey: `${key}:auto-approve`
+            });
+            void conversationTaskRunner.start(task.id, key).catch(() => undefined);
+          }
+        })().catch(() => undefined);
+      });
+    }
     const finalApproval = new FinalApprovalService({
       tasks: repositories.tasks,
       approvals: repositories.approvals,
@@ -591,6 +667,7 @@ export async function startWorker(options: WorkerStartOptions): Promise<WorkerRu
         roomService,
         taskService,
         taskExecutionServices,
+        ...(conversationTaskRunner ? { conversationTaskRunner } : {}),
         taskCommandHandlers,
         providerHealthService,
         async exportDiagnostics(destinationPath) {

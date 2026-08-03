@@ -95,7 +95,7 @@ input:disabled {
 
 .app-shell {
   display: grid;
-  grid-template-columns: minmax(248px, 0.78fr) minmax(480px, 2.2fr) minmax(280px, 0.92fr);
+  grid-template-columns: minmax(248px, 280px) minmax(480px, 1fr);
   height: 100vh;
   min-height: 0;
   overflow: hidden;
@@ -120,7 +120,6 @@ input:disabled {
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-  border-right: 1px solid var(--line);
   background: var(--workbench);
 }
 
@@ -1050,13 +1049,13 @@ h3 {
 
 @media (max-width: 979px) {
   .app-shell {
-    grid-template-columns: minmax(220px, 0.75fr) minmax(0, 2fr) minmax(0, 0.9fr);
-    grid-template-rows: minmax(0, 1fr) minmax(170px, auto);
+    grid-template-columns: minmax(220px, 248px) minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
   }
 
   .project-rail {
     grid-column: 1;
-    grid-row: 1 / 3;
+    grid-row: 1;
   }
 
   .room-form {
@@ -1068,30 +1067,9 @@ h3 {
   }
 
   .timeline-column {
-    grid-column: 2 / 4;
+    grid-column: 2;
     grid-row: 1;
     border-right: 0;
-  }
-
-  .room-inspector {
-    grid-column: 2 / 4;
-    grid-row: 2;
-    border-top: 1px solid var(--line);
-  }
-
-  .inspector-list {
-    display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-  }
-
-  .inspector-list > div {
-    padding-right: 1rem;
-    border-right: 1px solid var(--line);
-    border-bottom: 0;
-  }
-
-  .inspector-list > div + div {
-    padding-left: 1rem;
   }
 }
 
@@ -1099,15 +1077,14 @@ h3 {
   .app-shell {
     display: grid;
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: auto minmax(520px, 1fr) auto;
+    grid-template-rows: auto minmax(520px, 1fr);
     height: auto;
     min-height: 100vh;
     overflow: visible;
   }
 
   .project-rail,
-  .timeline-column,
-  .room-inspector {
+  .timeline-column {
     grid-column: 1;
   }
 
@@ -1123,10 +1100,6 @@ h3 {
     min-height: 520px;
   }
 
-  .room-inspector {
-    grid-row: 3;
-  }
-
   .inspector-list,
   .provider-grid,
   .task-facts {
@@ -1138,17 +1111,6 @@ h3 {
     flex-direction: column;
   }
 
-  .event-entry {
-    padding-left: 2.75rem;
-  }
-
-  .event-list::before {
-    left: 0.85rem;
-  }
-
-  .event-entry::before {
-    left: 0.53rem;
-  }
 }
 
 @media (prefers-reduced-motion: reduce) {
