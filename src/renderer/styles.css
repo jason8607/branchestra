@@ -419,53 +419,44 @@ h3 {
 }
 
 .event-list {
-  position: relative;
   display: grid;
-  gap: 1rem;
+  gap: 1.35rem;
   max-width: 760px;
   margin: 0 auto;
 }
 
-.event-list::before {
-  position: absolute;
-  top: 0.85rem;
-  bottom: 0.7rem;
-  left: 1.2rem;
-  width: 1px;
-  background: var(--line);
-  content: "";
-}
-
 .event-entry {
-  position: relative;
-  padding-left: 3.35rem;
-}
-
-.event-entry::before {
-  position: absolute;
-  top: 1.05rem;
-  left: 0.88rem;
-  z-index: 1;
-  width: 0.64rem;
-  height: 0.64rem;
-  border: 2px solid var(--cyan);
-  border-radius: 50%;
-  background: var(--workbench);
-  content: "";
+  min-width: 0;
 }
 
 .event-entry article {
-  padding: 1rem 1.1rem 1.15rem;
+  padding: 0.15rem 0 0.15rem 1rem;
+  border-left: 2px solid var(--line);
+}
+
+.event-entry--user {
+  width: min(82%, 560px);
+  margin-left: auto;
+}
+
+.event-entry--user article {
+  padding: 0.8rem 1rem 0.9rem;
   border: 1px solid var(--line-soft);
-  border-radius: 12px;
-  background: #131c24;
+  border-radius: 12px 12px 4px;
+  background: #19232c;
+}
+
+.event-entry--claude article {
+  border-left-color: var(--agent-claude);
+}
+
+.event-entry--codex article {
+  border-left-color: var(--agent-codex);
 }
 
 .event-meta {
   display: flex;
   align-items: baseline;
-  justify-content: space-between;
-  gap: 1rem;
 }
 
 .event-actor {
@@ -486,27 +477,12 @@ h3 {
   color: var(--muted);
 }
 
-.event-sequence {
-  color: var(--amber);
-  font-family: var(--utility);
-  font-size: 0.65rem;
-  letter-spacing: 0.04em;
-}
-
 .event-body {
-  margin: 0.65rem 0 0;
+  margin: 0.4rem 0 0;
   color: var(--ink-soft);
   font-size: 0.93rem;
   line-height: 1.66;
   white-space: pre-wrap;
-}
-
-.inline-action {
-  min-height: 31px;
-  margin-top: 0.75rem;
-  padding: 0.35rem 0.62rem;
-  color: var(--cyan-soft);
-  font-size: 0.7rem;
 }
 
 .empty-copy {

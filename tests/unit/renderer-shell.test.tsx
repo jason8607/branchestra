@@ -213,12 +213,12 @@ function realRendererApi(
 afterEach(cleanup);
 
 describe("renderer shell", () => {
-  it("renders Project/Room navigation, shared timeline, inspector, and composer", () => {
+  it("renders Project/Room navigation, conversation, inspector, and composer", () => {
     const html = renderToStaticMarkup(<App store={preloadedTimelineStore()} />);
 
     expect(html).toContain("專案");
     expect(html).toContain("房間");
-    expect(html).toContain("共享時間軸");
+    expect(html).toContain("對話");
     expect(html).toContain("詳細資訊");
     expect(html).toContain("Persisted hello");
     expect(html).toContain("data-testid=\"message-input\"");
@@ -582,7 +582,7 @@ describe("renderer shell", () => {
     expect(onSend).not.toHaveBeenCalled();
   });
 
-  it("renders escaped message text with a semantic actor and actual room sequence", () => {
+  it("renders escaped user message text without operational sequence metadata", () => {
     const unsafeBody = "<script>alert('branch')</script>";
     const event = {
       ...messageEvent(unsafeBody),
@@ -593,8 +593,8 @@ describe("renderer shell", () => {
     expect(html).toContain("&lt;script&gt;alert(&#x27;branch&#x27;)&lt;/script&gt;");
     expect(html).not.toContain("<script>");
     expect(html).toContain("aria-label=\"發言者：你\"");
-    expect(html).toContain("aria-label=\"房間序號 42\"");
-    expect(html).toContain("value=\"42\"");
+    expect(html).not.toContain("房間序號");
+    expect(html).not.toContain("#0042");
     expect(html).toContain(">你<");
   });
 
@@ -622,11 +622,23 @@ describe("renderer shell", () => {
       },
       createdAt: CREATED_AT
     };
-    const html = renderToStaticMarkup(<Timeline events={[event]} />);
+    const statusEvent: RoomEvent = {
+      id: "30000000-0000-4000-8000-000000000098",
+      roomId: ROOM_ID,
+      roomSeq: 42,
+      type: "task.transitioned",
+      actor: "system",
+      payload: { taskId: "task-codex-1", from: "Working", to: "Checkpoint", version: 4 },
+      createdAt: CREATED_AT
+    };
+    const html = renderToStaticMarkup(<Timeline events={[statusEvent, event]} />);
 
     expect(html).toContain("aria-label=\"發言者：Codex\"");
     expect(html).toContain(">Codex<");
     expect(html).toContain("測試成功，Codex 已正常回應。");
+    expect(html).not.toContain("任務狀態");
+    expect(html).not.toContain("系統");
+    expect(html).not.toContain("查看任務");
     expect(html).not.toContain("代理執行狀態已更新");
   });
 

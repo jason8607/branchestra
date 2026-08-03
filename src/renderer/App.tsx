@@ -52,7 +52,7 @@ export function App({ store }: { store: TimelineStore }): React.JSX.Element {
       <section className="timeline-column">
         <header className="timeline-header">
           <p className="section-kicker">{room ? room.title : "尚未選擇房間"}</p>
-          <h1>{room ? "共享時間軸" : "開始使用"}</h1>
+          <h1>{room ? "對話" : "開始使用"}</h1>
           {state.error ? <p className="connection-error" role="alert">{state.error}</p> : null}
         </header>
         {state.snapshot.projects.length === 0
@@ -61,7 +61,7 @@ export function App({ store }: { store: TimelineStore }): React.JSX.Element {
               onPick={(provider) => void store.pickProviderExecutable(provider)}
               onRefresh={() => void store.refreshProviderHealth()}
             /></section>
-          : <Timeline events={events} onSelectTask={(taskId) => store.selectTask(taskId)} />}
+          : <Timeline events={events} />}
         <Composer
           disabled={!room || state.connection !== "ready"}
           onSend={(body) => room ? store.postMessage(room.id, body) : Promise.resolve()}

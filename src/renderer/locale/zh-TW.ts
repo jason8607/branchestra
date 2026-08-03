@@ -1,4 +1,4 @@
-import type { RoomEvent, TaskState } from "../../shared/contracts/domain";
+import type { TaskState } from "../../shared/contracts/domain";
 import type { ProviderHealth } from "../../shared/contracts/provider";
 
 export const CONNECTION_LABEL = {
@@ -58,25 +58,4 @@ export function providerGuidance(health: ProviderHealth): string | null {
   return health.provider === "claude"
     ? "此版本尚未開放 Claude 執行。"
     : "此版本尚未開放 Codex 執行。";
-}
-
-export function roomEventLabel(event: RoomEvent): string {
-  switch (event.type) {
-    case "message.posted": return event.payload.body;
-    case "task.created": return "已建立代理任務";
-    case "task.transitioned": return `任務狀態：${TASK_STATE_LABEL[event.payload.from]} → ${TASK_STATE_LABEL[event.payload.to]}`;
-    case "approval.requested": return "需要你的核准";
-    case "approval.decided": return event.payload.receipt.decision === "approved" ? "已核准" : "已拒絕";
-    case "agent.run": return "代理執行狀態已更新";
-    case "checkpoint.created": return "已建立不可變更的檢查點";
-    case "review.started": return "已開始程式審查";
-    case "review.completed": return "程式審查已完成";
-    case "checkpoint.integrated": return "檢查點已整合";
-    case "integration.conflict": return "整合時發現衝突";
-    case "test.completed": return event.payload.result.exitCode === 0 ? "測試已通過" : "測試失敗";
-    case "candidate.created": return "已建立可供核准的候選版本";
-    case "task.interrupted": return "任務因工作程序中斷而暫停";
-    case "task.recovery": return "已準備復原方案";
-    case "merge.completed": return "候選版本已合併";
-  }
 }
