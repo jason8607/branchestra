@@ -18,6 +18,8 @@ export function ProviderHealthCard(props: { health: ProviderHealth; onPick(provi
       <div><dt>版本</dt><dd>{props.health.cliVersion ?? "無法取得"}</dd></div>
     </dl>
     {guidance ? <p className="provider-guidance" role="status">{guidance}</p> : null}
-    <button type="button" onClick={() => props.onPick(props.health.provider)}>選擇 {name} CLI</button>
+    {props.health.state === "ready"
+      ? <p className="provider-guidance" role="status">已自動連接，不需手動選擇。</p>
+      : <button type="button" onClick={() => props.onPick(props.health.provider)}>選擇 {name} CLI</button>}
   </section>;
 }

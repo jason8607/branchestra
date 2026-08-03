@@ -8,6 +8,7 @@ import {
   type AppSnapshot,
   type RoomEvent
 } from "../../shared/contracts/domain";
+import { parseAgentMentions } from "../../shared/agents/mention-parser";
 import { ProviderHealthSchema, type ProviderHealth, type ProviderId } from "../../shared/contracts/provider";
 import type { BranchestraApi } from "../../shared/contracts/renderer-api";
 import { ProjectCleanupPreviewSchema, RoomCleanupPreviewSchema, WorktreeCleanupPreviewSchema, type ProjectCleanupPreview, type RoomCleanupPreview, type WorktreeCleanupPreview } from "../../shared/contracts/protocol";
@@ -47,6 +48,8 @@ export interface TimelineStore {
 const EMPTY_SNAPSHOT: AppSnapshot = { projects: [], rooms: [], tasks: [], roomCursors: {} };
 const POST_INTERRUPTED_MESSAGE = "Message delivery was interrupted. Try again.";
 const CREATE_ROOM_INTERRUPTED_MESSAGE = "Room creation was interrupted. Try again.";
+
+class WorkerCommandRejectedError extends Error {}
 Object.freeze(EMPTY_SNAPSHOT.projects);
 Object.freeze(EMPTY_SNAPSHOT.rooms);
 Object.freeze(EMPTY_SNAPSHOT.tasks);
@@ -577,14 +580,19 @@ export function createTimelineStore(
       const operationEpoch = lifecycleEpoch;
       const statusOperation = beginStatusOperation();
       try {
+        const mentions = parseAgentMentions(trimmedBody);
         const response = await api.request({
           type: "message.post",
-          payload: { roomId, body: trimmedBody },
+          payload: {
+            roomId,
+            body: trimmedBody,
+            ...(mentions.length > 1 ? { leadProvider: mentions[0] } : {})
+          },
           idempotencyKey: nextId()
         });
         if (!isCurrent(operationEpoch)) throw new Error(POST_INTERRUPTED_MESSAGE);
         if (!response.payload.ok) {
-          throw new Error(response.payload.message);
+          throw new WorkerCommandRejectedError(response.payload.message);
         }
         if (response.payload.requestType !== "message.post") {
           throw new Error("Unexpected message response");
@@ -597,10 +605,12 @@ export function createTimelineStore(
           throw new Error(POST_INTERRUPTED_MESSAGE, { cause: error });
         }
         const message = error instanceof Error ? error.message : "Unable to post message";
-        patchStatus(operationEpoch, statusOperation, {
-          connection: "error",
-          error: message
-        });
+        if (!(error instanceof WorkerCommandRejectedError)) {
+          patchStatus(operationEpoch, statusOperation, {
+            connection: "error",
+            error: message
+          });
+        }
         throw new Error(message, { cause: error });
       }
     },

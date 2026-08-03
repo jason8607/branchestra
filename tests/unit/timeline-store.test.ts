@@ -549,6 +549,28 @@ describe("timeline store", () => {
     expect(store.getState().eventsByRoom[ROOM_ID]).toEqual([posted]);
   });
 
+  it("uses the first Agent mention as the explicit lead for a collaborative task", async () => {
+    const posted = messageEvent(1);
+    const fixture = apiHarness((command) => {
+      if (command.type === "state.getSnapshot") return successResponse(command, foundationSnapshot(0));
+      if (command.type === "room.replay") return successResponse(command, eventPage([], false));
+      if (command.type === "message.post") return successResponse(command, posted);
+      throw new Error(`Unexpected command: ${command.type}`);
+    });
+    const store = createTimelineStore(fixture.api, sequentialIds());
+    await store.hydrate();
+
+    await store.postMessage(ROOM_ID, "@Claude @Codex 測試回應");
+
+    expect(fixture.commands.find((command) => command.type === "message.post")).toMatchObject({
+      payload: {
+        roomId: ROOM_ID,
+        body: "@Claude @Codex 測試回應",
+        leadProvider: "claude",
+      },
+    });
+  });
+
   it("picks an existing project with an empty payload and refreshes after creation", async () => {
     const addedProject = project("10000000-0000-4000-8000-000000000002");
     let snapshotRequests = 0;
@@ -643,7 +665,7 @@ describe("timeline store", () => {
     expect(fixture.replayCursors).toEqual([0]);
   });
 
-  it("exposes a safe mutation error response without retrying with another key", async () => {
+  it("exposes a safe mutation error response without poisoning the Worker connection", async () => {
     const fixture = apiHarness((command) => {
       if (command.type === "state.getSnapshot") {
         return successResponse(command, foundationSnapshot(0));
@@ -663,8 +685,8 @@ describe("timeline store", () => {
 
     expect(fixture.commands.filter((command) => command.type === "message.post")).toHaveLength(1);
     expect(store.getState()).toMatchObject({
-      connection: "error",
-      error: "That room is no longer available"
+      connection: "ready",
+      error: null
     });
   });
 

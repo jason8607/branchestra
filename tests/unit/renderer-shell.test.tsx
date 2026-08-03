@@ -466,8 +466,8 @@ describe("renderer shell", () => {
     await waitFor(() => expect(screen.getByText("訊息未送出，請再試一次。")).toBeTruthy());
     expect(input.value).toBe("Keep this through the real store");
     expect(store.getState()).toMatchObject({
-      connection: "error",
-      error: "Room is no longer available"
+      connection: "ready",
+      error: null
     });
     expect(commands.filter((command) => command.type === "message.post")).toHaveLength(1);
   });

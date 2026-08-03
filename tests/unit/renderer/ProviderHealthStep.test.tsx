@@ -1,12 +1,11 @@
 // @vitest-environment jsdom
 import React from "react";
 import { render, screen } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { ProviderHealthStep } from "../../../src/renderer/features/onboarding/ProviderHealthStep";
 
 describe("ProviderHealthStep", () => {
-  it("shows local/auth boundaries, repair state, and no credential detail", async () => {
+  it("shows local/auth boundaries, repair state, and no credential detail", () => {
     const pick = vi.fn();
     render(<ProviderHealthStep health={[
       { provider: "claude", state: "policy_disabled", executableRealpath: "/opt/homebrew/bin/claude", cliVersion: "2.1.206", sdkVersion: "0.3.216", architecture: "arm64", authLabel: "Subscription-only", capabilities: null, repairAction: "Public Claude runs require written Anthropic approval." },
@@ -17,7 +16,8 @@ describe("ProviderHealthStep", () => {
     expect(screen.getAllByText("僅限訂閱帳號")).toHaveLength(2);
     expect(screen.getByText("此版本尚未開放 Claude 執行。")).not.toBeNull();
     expect(screen.queryByText(/token|api key|account id/i)).toBeNull();
-    await userEvent.click(screen.getByRole("button", { name: "選擇 Codex CLI" }));
-    expect(pick).toHaveBeenCalledWith("codex");
+    expect(screen.getByText("已自動連接，不需手動選擇。")).not.toBeNull();
+    expect(screen.queryByRole("button", { name: "選擇 Codex CLI" })).toBeNull();
+    expect(pick).not.toHaveBeenCalled();
   });
 });
