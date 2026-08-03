@@ -7,7 +7,8 @@ it.each([
   ["`@Claude` is documentation", []],
   ["email@Claude.com", []],
   ["@Claude and @Codex compare", ["claude", "codex"]],
-  ["@claude, @CLAUDE, then @codex", ["claude", "codex"]]
+  ["@claude, @CLAUDE, then @codex", ["claude", "codex"]],
+  ["＠Claude and ＠Codex compare", ["claude", "codex"]]
 ])("parses supported user mentions from %s", (text, expected) => {
   expect(parseAgentMentions(text)).toEqual(expected);
 });

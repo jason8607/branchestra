@@ -360,6 +360,36 @@ describe("renderer shell", () => {
     expect(input.value).toBe("");
   });
 
+  it("offers Agent mentions and renders selected Claude and Codex mentions with distinct identities", async () => {
+    const user = userEvent.setup();
+    const onSend = vi.fn().mockResolvedValue(undefined);
+    render(<Composer disabled={false} onSend={onSend} />);
+
+    const input = screen.getByTestId("message-input") as HTMLTextAreaElement;
+    await user.type(input, "@cl");
+
+    expect(screen.getByRole("listbox", { name: "選擇代理" })).toBeTruthy();
+    expect(screen.getByRole("option", { name: /Claude/ })).toBeTruthy();
+    expect(screen.queryByRole("option", { name: /Codex/ })).toBeNull();
+
+    await user.click(screen.getByRole("option", { name: /Claude/ }));
+    expect(input.value).toBe("@Claude ");
+    expect(screen.getByTestId("mention-claude").className).toContain("mention-token--claude");
+
+    await user.type(input, "＠co");
+    expect(screen.getByRole("option", { name: /Codex/ })).toBeTruthy();
+    await user.keyboard("{Enter}");
+
+    expect(input.value).toBe("@Claude @Codex ");
+    expect(screen.getByTestId("mention-codex").className).toContain("mention-token--codex");
+    expect(rendererStyles).toContain("--agent-claude:");
+    expect(rendererStyles).toContain("--agent-codex:");
+
+    await user.type(input, "一起檢查");
+    await user.click(screen.getByTestId("send-message"));
+    expect(onSend).toHaveBeenCalledWith("@Claude @Codex 一起檢查");
+  });
+
   it("keeps a newer draft when an earlier message resolves", async () => {
     const user = userEvent.setup();
     const pending = deferred();
